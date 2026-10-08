@@ -1,0 +1,17 @@
+{
+  "SleepTime": "22:00",
+  "WakeTime": "06:00",
+  "Mode": "Combined",
+  "Enabled": true,
+
+  "DisplayOffDelaySeconds": 60,
+  "WakePreRollMinutes": 1,
+
+  "WakeToleranceMinutes": 10,
+  "MaxWakeFailures": 2,
+  "MinimumSuspendSeconds": 30,
+  "MaxSuspendRetries": 20,
+
+  "KeepDisplayOffIntervalSeconds": 20,
+  "LogRetentionBytes": 2097152
+}

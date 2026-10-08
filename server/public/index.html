@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Wandpanel-Steuerung</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Wandpanel-Steuerung</h1>
+      <button id="logout" class="ghost" hidden>Abmelden</button>
+    </header>
+
+    <main>
+      <section id="login">
+        <h2>Anmelden</h2>
+        <form id="login-form">
+          <label for="password">Kennwort</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+          <button type="submit">Anmelden</button>
+        </form>
+      </section>
+
+      <section id="panels" hidden>
+        <div id="panel-list"></div>
+        <p class="hint">
+          Ein Panel erscheint hier automatisch, sobald es sich zum ersten Mal meldet.
+        </p>
+      </section>
+    </main>
+
+    <p id="message" role="status" hidden></p>
+
+    <template id="panel-template">
+      <article class="panel">
+        <div class="panel-head">
+          <h2 class="panel-name"></h2>
+          <span class="badge state"></span>
+        </div>
+
+        <dl class="status">
+          <div><dt>Letzte Meldung</dt><dd class="seen"></dd></div>
+          <div><dt>Bildschirm</dt><dd class="display"></dd></div>
+          <div><dt>Betriebsart</dt><dd class="effective"></dd></div>
+          <div><dt>Aufwach-Fehler</dt><dd class="failures"></dd></div>
+        </dl>
+        <p class="warn fallback" hidden></p>
+
+        <form class="schedule">
+          <div class="grid">
+            <label>Name<input name="name" type="text" maxlength="80" /></label>
+            <label>Schlafen ab<input name="sleepTime" type="time" required /></label>
+            <label>Aufwachen um<input name="wakeTime" type="time" required /></label>
+            <label>
+              Modus
+              <select name="mode">
+                <option value="Combined">Bildschirm aus + Standby</option>
+                <option value="DisplayOnly">nur Bildschirm aus</option>
+                <option value="SuspendOnly">nur Standby</option>
+              </select>
+            </label>
+          </div>
+          <label class="check">
+            <input name="enabled" type="checkbox" />
+            Zeitplan aktiv
+          </label>
+          <label>
+            Wach bleiben bis (einmalig, leer lassen für keine Ausnahme)
+            <input name="keepAwakeUntil" type="datetime-local" />
+          </label>
+          <div class="actions">
+            <button type="submit">Speichern</button>
+            <button type="button" class="ghost" data-command="wake-now">Jetzt aufwecken</button>
+            <button type="button" class="ghost" data-command="sleep-now">Jetzt schlafen</button>
+          </div>
+        </form>
+
+        <p class="hint delay">
+          Änderungen greifen beim nächsten Abruf des Panels, also innerhalb von etwa
+          5 Minuten. Während das Panel im Standby liegt, kann es nicht abfragen –
+          eine vorgezogene Weckzeit wirkt deshalb erst in der folgenden Nacht.
+        </p>
+      </article>
+    </template>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

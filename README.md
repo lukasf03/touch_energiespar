@@ -1,0 +1,299 @@
+# Wand-Display Energiesteuerung
+
+Steuerung für ein an der Wand montiertes Windows-Touchpanel, das dauerhaft eine
+Seite anzeigt (hier: `https://strichliste.dpsg-franziskus.de/#/monitor`).
+
+Ab einer eingestellten Uhrzeit geht der Bildschirm aus und das Gerät in den
+Energiesparmodus, zu einer zweiten Uhrzeit wacht es von selbst wieder auf und
+schaltet den Bildschirm ein. Rein zeitgesteuert – eine Berührung des Panels
+weckt das Gerät nachts nicht auf.
+
+Getestet für **Windows 10 IoT Enterprise** (funktioniert ebenso unter Windows 10
+und 11 Pro/Enterprise).
+
+---
+
+## Wie es funktioniert
+
+Drei geplante Aufgaben greifen ineinander:
+
+| Aufgabe | Zeitpunkt | Konto | Zweck |
+| --- | --- | --- | --- |
+| `\WallDisplayPower\Sleep` | Schlafenszeit | angemeldeter Benutzer | Bildschirm aus, danach Standby |
+| `\WallDisplayPower\WakeTimer` | Weckzeit − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
+| `\WallDisplayPower\Wake` | Weckzeit | angemeldeter Benutzer | Bildschirm ein, Nacht-Aufgabe beenden |
+| `\WallDisplayPower\Sync` | alle 5 Minuten | SYSTEM | Zeitplan vom Server holen, Zustand abgleichen (optional) |
+
+Warum diese Aufteilung:
+
+- **Den Bildschirm abschalten** kann nur ein Prozess in der Sitzung des
+  angemeldeten Benutzers. Eine Aufgabe als `SYSTEM` läuft in Sitzung 0 und
+  erreicht das Panel nicht. Deshalb laufen `Sleep` und `Wake` als Benutzer.
+- **Das Gerät aufwecken** ist dagegen als `SYSTEM` am verlässlichsten, weil der
+  Aufwachzeitgeber dann unabhängig vom Zustand der Benutzersitzung gesetzt
+  wird. `Wake` hat denselben Zeitgeber zusätzlich als zweite Absicherung.
+- Die Auslösezeiten sind als **Ortszeit** eingetragen, nicht als UTC. Damit
+  bleiben 22:00 und 06:00 auch nach der Zeitumstellung 22:00 und 06:00.
+
+### Betriebsmodi
+
+- **`Combined`** (Standard): Bildschirm aus, nach 60 Sekunden Standby. Wacht das
+  Gerät vor der Weckzeit unerwartet auf (z. B. durch Windows-Wartung), schaltet
+  es den Bildschirm sofort wieder aus und geht erneut in den Standby.
+- **`DisplayOnly`**: nur Bildschirm aus, kein Standby. Das Gerät bleibt im Netz
+  erreichbar, die angezeigte Seite bleibt geladen. Ein Wächter schaltet den
+  Bildschirm alle 20 Sekunden erneut aus, damit Streu-Eingaben des
+  Touchscreens ihn nicht wieder anschalten.
+- **`SuspendOnly`**: ohne Vorlauf direkt in den Standby.
+
+### Automatischer Rückfall
+
+Nicht jede Hardware wacht per Zeitgeber verlässlich auf. Deshalb prüft die
+Steuerung sich selbst:
+
+- Vor dem ersten Standby wird geprüft, ob eine Aufgabe mit Aufwachzeitgeber
+  existiert, ob Aufwachzeitgeber im Energieschema erlaubt sind und ob
+  `powercfg /a` überhaupt einen Standby-Zustand meldet. Fehlt etwas, bleibt es
+  bei **Bildschirm aus**.
+- Verweigert das Gerät den Standby, wird sofort auf `DisplayOnly` zurückgestuft.
+- Wacht das Gerät mehr als 10 Minuten zu spät auf, zählt das als Fehlversuch.
+  Nach 2 Fehlversuchen in Folge läuft die Steuerung dauerhaft in `DisplayOnly`
+  weiter, damit das Panel morgens auf jeden Fall etwas anzeigt.
+- Zurücksetzen nach einer Rückstufung: `WallDisplay.ps1 -Action Reset`.
+
+---
+
+## Steuerung von außen (optional)
+
+Im Ordner `server/` liegt ein kleiner Docker-Dienst mit Weboberfläche. Dort
+lassen sich Zeiten, Modus und Ausnahmen für jedes Panel einstellen; die Panels
+holen sich das alle 5 Minuten ab und melden ihren Zustand zurück.
+
+### Server starten
+
+```bash
+cd server && cp .env.example .env
+```
+
+In `.env` `PANEL_TOKEN` und `ADMIN_PASSWORD` durch Zufallswerte ersetzen, dann:
+
+```bash
+docker compose up -d --build
+```
+
+Der Container lauscht standardmäßig nur auf `127.0.0.1:8080`. Für den Zugriff
+aus dem Netz einen Reverse-Proxy mit HTTPS davorsetzen (Caddy, nginx, Traefik)
+und in `.env` `TRUST_PROXY=1` setzen – dann wird das Sitzungs-Cookie als
+`Secure` markiert.
+
+### Panel anbinden
+
+```bash
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -ServerUrl https://panel.example.org -PanelId pfarrheim -ApiToken "<PANEL_TOKEN>"
+```
+
+Das Panel erscheint nach dem ersten Abruf automatisch in der Weboberfläche. Die
+Zugangsdaten landen in `C:\ProgramData\WallDisplayPower\sync.json`, lesbar nur
+für SYSTEM und Administratoren.
+
+Ohne `-ServerUrl` bleibt alles wie vorher: das Panel arbeitet rein mit seiner
+lokalen `config.json`.
+
+### Was sich einstellen lässt
+
+- Schlafenszeit, Weckzeit, Modus
+- Zeitplan aktiv / aus (`enabled`)
+- **Wach bleiben bis** – einmalige Ausnahme, z. B. für eine Gruppenstunde
+- **Jetzt aufwecken** – Tagbetrieb bis zur nächsten regulären Schlafenszeit
+- **Jetzt schlafen** – Nachtbetrieb bis zur nächsten regulären Weckzeit
+
+### Wann eine Änderung greift
+
+Der Agent ist als *Zustandsabgleich* gebaut, nicht als reine Zeitsteuerung. Er
+vergleicht bei jedem Abruf, ob gerade Tag- oder Nachtbetrieb gelten soll, und
+zieht nach. Eine mittags auf 11:00 vorgezogene Weckzeit wirkt deshalb sofort
+beim nächsten Abruf, ohne auf den nächsten Auslöser zu warten.
+
+**Die eine Ausnahme:** Während das Panel im Standby liegt, kann es nichts
+abfragen. Der Aufwachzeitgeber steht dann noch auf der alten Weckzeit.
+
+- Weckzeit **nach hinten** verschoben: funktioniert auch nachts. Das Panel
+  wacht zur alten Zeit auf, merkt beim Abruf, dass das Fenster noch gilt, und
+  legt sich wieder hin.
+- Weckzeit **nach vorne** gezogen: wirkt erst in der folgenden Nacht. Wer das
+  sofort braucht, nutzt „Jetzt aufwecken" am Tag davor oder Wake-on-LAN.
+
+Fällt der Server aus, behält das Panel den letzten gültigen Zeitplan. Es gibt
+bewusst keinen Rückfall auf „immer an" – das wäre genau der Zustand, der
+vermieden werden soll.
+
+### Sicherheit
+
+Die Serverantwort entscheidet, wann ein Rechner schlafen geht. Der Agent
+behandelt sie deshalb ausschließlich als Daten: jedes Feld wird gegen ein
+festes Muster geprüft (Uhrzeiten, Modus und Befehle nur aus einer festen
+Liste), unbekannte Felder werden verworfen, und es wird nichts aus der Antwort
+ausgeführt – kein Pfad, kein Befehlstext, kein Skript. Ein ungültiges Feld
+lässt den ganzen Abruf scheitern, dann bleibt der letzte gültige Zeitplan
+gültig. `http` wird abgelehnt, solange nicht ausdrücklich `AllowInsecureHttp`
+gesetzt ist.
+
+Das Panel-Token ist für alle Panels gleich – das genügt, wenn der Server nicht
+öffentlich erreichbar ist. Für mehr Trennung bräuchte es Token pro Panel; das
+ist bewusst nicht gebaut, weil es die Einrichtung je Gerät verkompliziert.
+
+### Server-Tests
+
+```bash
+cd server && npm install && npm test
+```
+
+---
+
+## Installation
+
+1. Den Ordner auf das Panel kopieren, z. B. nach `C:\Tools\WindowsEnergie`.
+2. PowerShell **als Administrator** öffnen und einrichten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -SleepTime 22:00 -WakeTime 06:00
+```
+
+Läuft das Panel unter einem eigenen Autologon-Konto, dieses mit angeben:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -SleepTime 22:00 -WakeTime 06:00 -UserId "PANEL-PC\kiosk"
+```
+
+`Install.ps1` erledigt dabei:
+
+- Konfiguration nach `C:\ProgramData\WallDisplayPower\config.json` schreiben
+- Bildschirm- und Standby-Zeitüberschreitungen auf „nie" setzen (die Steuerung
+  übernimmt das selbst)
+- Aufwachzeitgeber erlauben, Hybrid-Standby abschalten
+- Ruhezustand abschalten, damit das Gerät wirklich in den Standby (S3) geht und
+  nicht in den Ruhezustand (S4) – das schaltet gleichzeitig den Schnellstart ab
+  (mit `-KeepHibernate` unterdrückbar)
+- die drei Aufgaben registrieren
+
+3. **Selbsttest ausführen** – das ist der entscheidende Schritt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay.ps1 -Action SelfTest
+```
+
+Das Gerät geht für drei Minuten in den Standby und soll von selbst aufwachen.
+Während des Tests nichts berühren. Danach steht im Klartext, ob der Modus
+`Combined` tragfähig ist oder ob auf `DisplayOnly` umgestellt werden sollte.
+
+---
+
+## Konfiguration
+
+`C:\ProgramData\WallDisplayPower\config.json`:
+
+| Schlüssel | Standard | Bedeutung |
+| --- | --- | --- |
+| `SleepTime` | `22:00` | Beginn des Nachtbetriebs |
+| `WakeTime` | `06:00` | Beginn des Tagbetriebs |
+| `Mode` | `Combined` | `Combined`, `DisplayOnly` oder `SuspendOnly` |
+| `DisplayOffDelaySeconds` | `60` | Wartezeit zwischen Bildschirm aus und Standby |
+| `WakePreRollMinutes` | `1` | Vorlauf des Aufwachzeitgebers vor der Weckzeit |
+| `WakeToleranceMinutes` | `10` | erlaubte Verspätung beim Aufwachen |
+| `MaxWakeFailures` | `2` | Fehlversuche bis zum Rückfall auf `DisplayOnly` |
+| `MinimumSuspendSeconds` | `30` | kürzerer „Standby" gilt als gescheitert |
+| `MaxSuspendRetries` | `20` | Grenze für erneute Standby-Versuche pro Nacht |
+| `KeepDisplayOffIntervalSeconds` | `20` | Takt des Bildschirm-Wächters |
+| `Enabled` | `true` | Zeitplan aktiv; `false` lässt das Panel durchlaufen |
+
+Mit angebundenem Server werden `SleepTime`, `WakeTime`, `Mode` und `Enabled` bei
+jedem Abruf überschrieben – dort ist der Server die Quelle. Von Hand ändern
+lohnt sich dann nur bei den übrigen Werten.
+
+Ohne Server: Nach Änderungen an den **Uhrzeiten** muss `Install.ps1` erneut
+laufen, damit die Aufgaben-Zeitpunkte mitgezogen werden. Änderungen an `Mode`
+und den übrigen Werten greifen ab der nächsten Nacht ohne Neuinstallation.
+
+---
+
+## Betrieb und Fehlersuche
+
+Status mit Konfiguration, Zustand, Aufgaben und den letzten Protokollzeilen:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay.ps1 -Action Status
+```
+
+Ausführliche Analyse (`powercfg /a`, `/waketimers`, `/lastwake`, `/requests`,
+armierte Geräte, Ereignisprotokoll):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay.ps1 -Action Diagnose
+```
+
+Weitere Aktionen: `-Action DisplayOff`, `-Action DisplayOn`, `-Action Reset`.
+
+Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
+
+### Typische Ursachen, wenn das Gerät nicht aufwacht
+
+- **BIOS/UEFI**: „Wake on RTC" bzw. „RTC Alarm" muss aktiv sein, „ErP Ready"
+  oder „Deep Sleep" müssen aus sein. Beides kappt sonst die Stromversorgung so
+  weit, dass kein Zeitgeber mehr zündet.
+- **Modern Standby (S0)**: Zeigt `powercfg /a` „S0 Low Power Idle", ist das
+  Verhalten stark geräteabhängig. Hier ist der Selbsttest Pflicht; im
+  Zweifelsfall `DisplayOnly` verwenden.
+- **Gruppenrichtlinie**: Setzt eine Richtlinie „Aufwachzeitgeber zulassen" auf
+  deaktiviert, überschreibt sie die Einstellung von `Install.ps1`. Der Status
+  zeigt das als „DEAKTIVIERT" an.
+- **Ruhezustand aktiv**: Geht das Gerät in S4 statt S3, dauert das Aufwachen
+  lange und die Sitzung kann wegbrechen. `Install.ps1` schaltet ihn deshalb ab.
+
+### Wenn das Bild nach dem Aufwachen schwarz bleibt
+
+`Wake` schaltet das Panel über drei Wege ein (Leerlaufzähler zurücksetzen,
+Monitor-Einschaltbefehl, minimale Mausbewegung). Bleibt es trotzdem dunkel,
+liegt es meist am Grafiktreiber nach Resume – dann ist `DisplayOnly` die
+robustere Wahl, weil das Gerät durchläuft.
+
+### Anzeige der Strichliste
+
+Die Steuerung lädt die Seite nicht neu. Wenn der Kiosk-Browser nach einer Nacht
+im Standby eine veraltete Ansicht zeigt, empfiehlt sich im Browser selbst ein
+periodischer Reload (z. B. Kiosk-Erweiterung oder eine Meta-Refresh-Hülle).
+Unter `DisplayOnly` tritt das Problem praktisch nicht auf.
+
+---
+
+## Deinstallation
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Uninstall.ps1
+```
+
+Mit `-RemoveData` werden zusätzlich Konfiguration, Zustand und Protokoll
+gelöscht, mit `-RestorePowerDefaults` die Energieoptionen auf übliche Werte
+zurückgesetzt.
+
+---
+
+## Dateien
+
+| Datei | Zweck |
+| --- | --- |
+| `Install.ps1` | Einrichtung: Konfiguration, Energieoptionen, Aufgaben |
+| `Uninstall.ps1` | Entfernen |
+| `config.json` | Vorlage der Konfiguration |
+| `src/WallDisplay.ps1` | Hauptskript mit allen Aktionen |
+| `src/WallDisplay.Core.psm1` | Kernfunktionen inkl. Win32-Aufrufen und Sync |
+| `src/run-hidden.vbs` | Starter ohne sichtbares Konsolenfenster |
+| `server/src/index.js` | Steuerungsserver (Express) |
+| `server/src/db.js` | Datenhaltung über `node:sqlite` |
+| `server/src/validate.js` | Prüfung aller Eingaben |
+| `server/public/` | Weboberfläche (ohne Framework) |
+| `server/test/api.test.js` | Tests der Schnittstelle |
+| `server/Dockerfile`, `server/docker-compose.yml` | Container |
+
+Eine Anmerkung zum Server: `node:sqlite` ist in Node noch als experimentell
+markiert und würde eine Warnung ausgeben. Im Container ist sie über
+`NODE_NO_WARNINGS=1` unterdrückt; funktional ist das Modul stabil.

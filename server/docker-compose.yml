@@ -1,0 +1,29 @@
+services:
+  walldisplay:
+    build: .
+    image: walldisplay-server:1.1.0
+    container_name: walldisplay
+    restart: unless-stopped
+    environment:
+      # Gemeinsames Token der Panels, mindestens 16 Zeichen.
+      PANEL_TOKEN: ${PANEL_TOKEN:?PANEL_TOKEN fehlt}
+      # Kennwort der Weboberflaeche, mindestens 8 Zeichen.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD fehlt}
+      # Auf 1 setzen, wenn ein Reverse-Proxy mit HTTPS davor steht.
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+    ports:
+      - '${BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-8080}:8080'
+    volumes:
+      - walldisplay-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  walldisplay-data:
