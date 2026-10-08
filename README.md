@@ -271,6 +271,10 @@ entfällt das Problem, weil das Gerät durchläuft.
 
 ## Installation
 
+> **Vollständige Schritt-für-Schritt-Anleitung:** [INSTALLATION.md](INSTALLATION.md)
+> – inklusive BIOS, Autologon, Kiosk-Browser und Checkliste zum Abhaken.
+> Die folgende Kurzfassung setzt voraus, dass das Panel bereits vorbereitet ist.
+
 1. Den Ordner auf das Panel kopieren, z. B. nach `C:\Tools\WindowsEnergie`.
 2. PowerShell **als Administrator** öffnen und einrichten:
 
@@ -404,6 +408,7 @@ zurückgesetzt.
 
 | Datei | Zweck |
 | --- | --- |
+| `INSTALLATION.md` | Schritt-für-Schritt-Anleitung mit Checkliste |
 | `Install.ps1` | Einrichtung: Konfiguration, Energieoptionen, Aufgaben |
 | `Uninstall.ps1` | Entfernen |
 | `config.json` | Vorlage der Konfiguration |

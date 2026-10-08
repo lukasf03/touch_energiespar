@@ -628,6 +628,10 @@ function Invoke-StatusAction {
     $wakeText = switch ($wakeTimers) { $true { 'erlaubt' } $false { 'DEAKTIVIERT' } default { 'nicht ermittelbar' } }
     Write-Host ('  Aufwachzeitgeber      : {0}' -f $wakeText) -ForegroundColor $(if ($wakeTimers -eq $false) { 'Red' } else { 'Gray' })
 
+    $lock = Get-ConsoleLockSetting
+    $lockText = switch ($lock) { $true { 'JA - Panel zeigt dann den Sperrbildschirm' } $false { 'nein' } default { 'nicht ermittelbar' } }
+    Write-Host ('  Anmeldung nach Wecken : {0}' -f $lockText) -ForegroundColor $(if ($lock -eq $true) { 'Red' } else { 'Gray' })
+
     $lang = Get-SystemLanguageInfo
     Write-Host ('  Systemsprache         : {0} (ohne Einfluss: Konten ueber SIDs, Energieoptionen ueber GUIDs)' -f $lang.UiCulture) -ForegroundColor DarkGray
 

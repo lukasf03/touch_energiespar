@@ -16,6 +16,8 @@ $script:TaskSync     = 'Sync'
 $script:GuidSubSleep    = '238c9fa8-0aad-41ed-83f4-97be242c8f20'
 $script:GuidWakeTimers  = 'bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d'
 $script:GuidHybridSleep = '94ac6d29-73ce-41a6-809f-6363ba21b47e'
+$script:GuidSubNone     = 'fea3413e-7e05-4911-9a71-700331f1c294'
+$script:GuidConsoleLock = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
 
 $script:AgentVersion = '1.1.0'
 
@@ -896,6 +898,25 @@ function Get-WakeTimerSetting {
     return $null
 }
 
+function Get-ConsoleLockSetting {
+    <#
+        Verlangt Windows nach dem Aufwachen eine Anmeldung?
+        $true  = ja, das Panel zeigt dann den Sperrbildschirm
+        $false = nein (so soll es sein)
+        $null  = nicht ermittelbar
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $entry = Get-CimInstance -Namespace 'root\cimv2\power' -ClassName 'Win32_PowerSettingDataIndex' -ErrorAction Stop |
+            Where-Object { $_.InstanceID -like ('*' + $script:GuidConsoleLock + '*') -and $_.InstanceID -like '*\AC\*' } |
+            Select-Object -First 1
+        if ($entry) { return ([int]$entry.SettingIndexValue -ne 0) }
+    } catch { }
+    return $null
+}
+
 function Set-WallPowerPolicy {
     <#
         Legt die Energieoptionen fuer den Dauerbetrieb eines Wandpanels fest:
@@ -916,6 +937,13 @@ function Set-WallPowerPolicy {
         @('/setdcvalueindex', 'SCHEME_CURRENT', $script:GuidSubSleep, $script:GuidWakeTimers, '1'),
         @('/setacvalueindex', 'SCHEME_CURRENT', $script:GuidSubSleep, $script:GuidHybridSleep, '0'),
         @('/setdcvalueindex', 'SCHEME_CURRENT', $script:GuidSubSleep, $script:GuidHybridSleep, '0'),
+
+        # Keine Anmeldung nach dem Aufwachen verlangen. Sonst zeigt das Panel
+        # morgens den Sperrbildschirm statt der Strichliste, und die Aufgaben
+        # in der Benutzersitzung koennen den Bildschirm nicht mehr schalten.
+        @('/setacvalueindex', 'SCHEME_CURRENT', $script:GuidSubNone, $script:GuidConsoleLock, '0'),
+        @('/setdcvalueindex', 'SCHEME_CURRENT', $script:GuidSubNone, $script:GuidConsoleLock, '0'),
+
         @('/setactive', 'SCHEME_CURRENT')
     )
 
@@ -1607,7 +1635,7 @@ Export-ModuleMember -Function @(
     'Register-WakeFailure', 'Register-WakeSuccess',
     'New-WallSignal', 'Remove-WallSignal', 'Test-WallSignal', 'Wait-WallInterval',
     'Initialize-WallNative', 'Set-DisplayPower', 'Invoke-SystemSuspend',
-    'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Set-WallPowerPolicy',
+    'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Get-ConsoleLockSetting', 'Set-WallPowerPolicy',
     'Get-WallTaskNames', 'Get-WallTask', 'Stop-WallSleepTask', 'Test-SuspendPrecondition',
     'Test-WakeTaskMatchesSchedule', 'Grant-WallDataAccess', 'Get-SystemLanguageInfo',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',
