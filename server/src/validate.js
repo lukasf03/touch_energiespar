@@ -62,6 +62,16 @@ export function assertOptionalTimestamp(value, field) {
   return date.toISOString();
 }
 
+// Wartungsfenster: lang genug fuer eine echte Sitzung, kurz genug, dass ein
+// vergessenes Fenster nicht die halbe Woche Strom kostet.
+export function assertMaintenanceMinutes(value) {
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes) || minutes < 5 || minutes > 480) {
+    throw new ValidationError('Wartungsdauer muss eine ganze Zahl zwischen 5 und 480 Minuten sein.');
+  }
+  return minutes;
+}
+
 export function assertName(value) {
   const text = String(value ?? '').trim();
   if (text.length > 80) throw new ValidationError('Name darf hoechstens 80 Zeichen lang sein.');
@@ -104,7 +114,13 @@ export function parseHeartbeat(body) {
   const text = (value, max = 200) =>
     value === null || value === undefined ? null : String(value).slice(0, max);
 
+  // Die Fernwartungs-Kennung wird in der Oberflaeche angezeigt, darum nur
+  // unbedenkliche Zeichen zulassen.
+  const remoteId = String(body.remoteId ?? '');
+  const safeRemoteId = /^[A-Za-z0-9_-]{4,32}$/.test(remoteId) ? remoteId : null;
+
   return {
+    remoteId: safeRemoteId,
     agentVersion: text(body.agentVersion, 32),
     computerName: text(body.computerName, 64),
     reportedAtUtc: text(body.reportedAtUtc, 40),

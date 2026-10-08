@@ -1062,6 +1062,58 @@ function Get-WallAgentVersion {
     return $script:AgentVersion
 }
 
+function Get-RemoteAccessId {
+    <#
+        Ermittelt die RustDesk-Kennung des Panels, damit die Weboberflaeche
+        anzeigt, womit man sich verbinden muss.
+
+        Reine Zusatzinformation: Die Funktion wirft nie und gibt $null zurueck,
+        wenn RustDesk nicht installiert ist. Zuerst wird die Konfigurationsdatei
+        gelesen (kein Prozessstart), erst danach das Programm befragt.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Laeuft RustDesk als Dienst, liegt die Konfiguration im Profil von
+        # LOCAL SERVICE, sonst im Profil des angemeldeten Benutzers.
+        $configs = @(
+            (Join-Path $env:WINDIR 'ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml'),
+            (Join-Path $env:APPDATA 'RustDesk\config\RustDesk.toml')
+        )
+        foreach ($config in $configs) {
+            if (-not (Test-Path -LiteralPath $config)) { continue }
+            $match = Select-String -LiteralPath $config -Pattern "^\s*id\s*=\s*['`"]?([A-Za-z0-9_-]{4,32})" |
+                Select-Object -First 1
+            if ($match) { return $match.Matches[0].Groups[1].Value }
+        }
+
+        $exe = @(
+            (Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'RustDesk\rustdesk.exe')
+        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+        if (-not $exe) { return $null }
+
+        # Mit Zeitlimit starten: der Abgleich darf nicht haengen bleiben.
+        $out = Join-Path $env:TEMP ('walldisplay-rdid-' + [guid]::NewGuid().ToString('N') + '.txt')
+        try {
+            $process = Start-Process -FilePath $exe -ArgumentList '--get-id' -NoNewWindow -PassThru `
+                -RedirectStandardOutput $out
+            if (-not $process.WaitForExit(5000)) {
+                $process.Kill()
+                return $null
+            }
+            $text = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
+            if ($text -and $text -match '([A-Za-z0-9_-]{4,32})') { return $Matches[1] }
+        } finally {
+            Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-WallLog -Level WARN ("RustDesk-Kennung nicht ermittelbar: {0}" -f $_.Exception.Message)
+    }
+    return $null
+}
+
 function New-WallDailyTrigger {
     <#
         Taeglicher Ausloeser zur angegebenen Ortszeit.
@@ -1148,7 +1200,7 @@ Export-ModuleMember -Function @(
     'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Set-WallPowerPolicy',
     'Get-WallTaskNames', 'Get-WallTask', 'Stop-WallSleepTask', 'Test-SuspendPrecondition',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',
-    'ConvertTo-ValidatedSchedule', 'Send-WallHeartbeat', 'Get-WallAgentVersion',
+    'ConvertTo-ValidatedSchedule', 'Send-WallHeartbeat', 'Get-WallAgentVersion', 'Get-RemoteAccessId',
     'New-WallDailyTrigger', 'Update-WallTaskTime', 'Start-WallTask',
     'Test-WallAdmin'
 )

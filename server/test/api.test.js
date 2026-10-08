@@ -310,6 +310,99 @@ test('Zeitplan abschalten wird uebertragen', async () => {
   assert.equal(fetched.enabled, false);
 });
 
+// --- Fernwartung ----------------------------------------------------------
+
+test('Fernwartungs-Kennung wird uebernommen und angezeigt', async () => {
+  await fetch(`${baseUrl}/api/v1/panels/pfarrheim/heartbeat`, {
+    method: 'POST',
+    headers: { ...panelHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ remoteId: '123456789', displayState: 'on' }),
+  });
+
+  const headers = await adminLogin();
+  const panel = await (await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, { headers })).json();
+  assert.equal(panel.heartbeat.remoteId, '123456789');
+});
+
+test('Unbrauchbare Fernwartungs-Kennung wird verworfen', async () => {
+  const headers = await adminLogin();
+  for (const value of ['<script>alert(1)</script>', 'ab', 'x'.repeat(40), '12 34']) {
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/heartbeat`, {
+      method: 'POST',
+      headers: { ...panelHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remoteId: value }),
+    });
+    const panel = await (await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, { headers })).json();
+    assert.equal(panel.heartbeat.remoteId, null, `"${value}" haette verworfen werden muessen`);
+  }
+});
+
+test('Wartungsfenster haelt das Panel befristet wach', async () => {
+  const headers = await adminLogin();
+  const response = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim/maintenance`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ minutes: 60 }),
+  });
+  assert.equal(response.status, 200);
+
+  const fetched = await (
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
+  ).json();
+  const minutes = (new Date(fetched.keepAwakeUntil).getTime() - Date.now()) / 60000;
+  assert.ok(minutes > 58 && minutes <= 60, `Fenster liegt bei ${minutes} Minuten`);
+});
+
+test('Wartungsfenster ohne Angabe dauert 60 Minuten', async () => {
+  const headers = await adminLogin();
+  await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim/maintenance`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  });
+  const fetched = await (
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
+  ).json();
+  const minutes = (new Date(fetched.keepAwakeUntil).getTime() - Date.now()) / 60000;
+  assert.ok(minutes > 58 && minutes <= 60);
+});
+
+test('Unsinnige Wartungsdauer wird abgewiesen', async () => {
+  const headers = await adminLogin();
+  for (const minutes of [0, 4, 481, -60, 1.5, 'lange', null]) {
+    const response = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim/maintenance`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ minutes }),
+    });
+    // null faellt auf den Standardwert 60 zurueck, alles andere ist ungueltig.
+    const expected = minutes === null ? 200 : 400;
+    assert.equal(response.status, expected, `minutes=${minutes} ergab ${response.status}`);
+  }
+});
+
+test('Wartungsfenster laesst sich beenden', async () => {
+  const headers = await adminLogin();
+  await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ keepAwakeUntil: null }),
+  });
+  const fetched = await (
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
+  ).json();
+  assert.equal(fetched.keepAwakeUntil, null);
+});
+
+test('Wartungsfenster ohne Anmeldung wird abgewiesen', async () => {
+  const response = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim/maintenance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minutes: 60 }),
+  });
+  assert.equal(response.status, 401);
+});
+
 test('Unbekanntes Panel liefert 404 in der Oberflaeche', async () => {
   const headers = await adminLogin();
   const response = await fetch(`${baseUrl}/api/v1/admin/panels/gibtesnicht`, { headers });

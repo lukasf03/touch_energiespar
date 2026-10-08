@@ -13,7 +13,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { openDatabase, listPanels, getPanel, ensurePanel, updatePanel, setCommand, saveHeartbeat } from './db.js';
-import { ValidationError, assertPanelId, assertCommand, parseScheduleInput, parseHeartbeat } from './validate.js';
+import {
+  ValidationError,
+  assertPanelId,
+  assertCommand,
+  assertMaintenanceMinutes,
+  parseScheduleInput,
+  parseHeartbeat,
+} from './validate.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -196,6 +203,21 @@ app.post('/api/v1/admin/panels/:panelId/command', requireAdmin, (req, res) => {
   const id = assertPanelId(req.params.panelId);
   if (!getPanel(id)) return res.status(404).json({ error: 'Panel nicht gefunden.' });
   res.json(setCommand(id, assertCommand(req.body?.name)));
+});
+
+// Wartungsfenster: haelt das Panel fuer eine begrenzte Zeit wach, damit man
+// sich per Fernwartung aufschalten kann. Danach gilt wieder der Zeitplan.
+//
+// Das wirkt nur, solange das Panel ueberhaupt erreichbar ist. Liegt es bereits
+// im Energiesparmodus, kann es nichts abrufen - dann greift das Fenster erst,
+// wenn es durch seinen Aufwachzeitgeber von selbst hochkommt.
+app.post('/api/v1/admin/panels/:panelId/maintenance', requireAdmin, (req, res) => {
+  const id = assertPanelId(req.params.panelId);
+  if (!getPanel(id)) return res.status(404).json({ error: 'Panel nicht gefunden.' });
+
+  const minutes = assertMaintenanceMinutes(req.body?.minutes ?? 60);
+  const until = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  res.json(updatePanel(id, { keepAwakeUntil: until }));
 });
 
 // ------------------------------------------------------------------- Statisch

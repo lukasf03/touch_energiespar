@@ -1,4 +1,4 @@
-// Weboberflaeche der Wandpanel-Steuerung. Bewusst ohne Framework: die Seite
+﻿// Weboberflaeche der Wandpanel-Steuerung. Bewusst ohne Framework: die Seite
 // besteht aus einer Liste und einem Formular je Panel.
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -101,15 +101,74 @@ function renderPanel(panel) {
   badge.className = `badge state ${online ? (sleeping ? 'night' : 'day') : 'stale'}`;
 
   $('.seen', node).textContent = formatSeen(panel.heartbeatAt);
-  $('.display', node).textContent = beat.displayState ?? '–';
-  $('.effective', node).textContent = beat.effectiveMode ?? '–';
-  $('.failures', node).textContent = beat.consecutiveWakeFailures ?? '–';
+  $('.display', node).textContent = beat.displayState ?? 'â€“';
+  $('.effective', node).textContent = beat.effectiveMode ?? 'â€“';
+  $('.failures', node).textContent = beat.consecutiveWakeFailures ?? 'â€“';
 
   if (beat.fallbackReason) {
     const warn = $('.fallback', node);
-    warn.textContent = `Rückstufung aktiv: ${beat.fallbackReason}`;
+    warn.textContent = `RÃ¼ckstufung aktiv: ${beat.fallbackReason}`;
     warn.hidden = false;
   }
+
+  // --- Fernwartung ---
+  const remoteId = beat.remoteId ?? null;
+  $('.remote-id', node).textContent = remoteId ?? 'nicht gemeldet';
+  if (remoteId) {
+    const copy = $('.copy-id', node);
+    copy.hidden = false;
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(remoteId);
+        showMessage('Kennung kopiert.', 'ok');
+      } catch {
+        showMessage('Kopieren nicht mÃ¶glich, bitte von Hand Ã¼bernehmen.', 'error');
+      }
+    });
+  }
+
+  const awakeUntil = panel.keepAwakeUntil ? new Date(panel.keepAwakeUntil) : null;
+  if (awakeUntil && awakeUntil.getTime() > Date.now()) {
+    const minutes = Math.round((awakeUntil.getTime() - Date.now()) / 60000);
+    const info = $('.awake-until', node);
+    info.textContent = `Bleibt noch ${minutes} Minuten wach (bis ${awakeUntil.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}).`;
+    info.hidden = false;
+  }
+
+  const sendMaintenance = async (body, text) => {
+    try {
+      await api(`/api/v1/admin/panels/${encodeURIComponent(panel.id)}/maintenance`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      showMessage(text, 'ok');
+      await loadPanels();
+    } catch (error) {
+      showMessage(error.message, 'error');
+    }
+  };
+
+  $('.maintenance-start', node).addEventListener('click', () => {
+    const minutes = Number($('.maintenance-minutes', node).value);
+    sendMaintenance(
+      { minutes },
+      `Panel bleibt ${minutes} Minuten wach. Es Ã¼bernimmt das beim nÃ¤chsten Abruf, also binnen etwa 5 Minuten.`,
+    );
+  });
+
+  // Wartung beenden heisst: Uebersteuerung loeschen, danach gilt der Zeitplan.
+  $('.maintenance-stop', node).addEventListener('click', async () => {
+    try {
+      await api(`/api/v1/admin/panels/${encodeURIComponent(panel.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ keepAwakeUntil: null }),
+      });
+      showMessage('Wartungsfenster beendet, es gilt wieder der Zeitplan.', 'ok');
+      await loadPanels();
+    } catch (error) {
+      showMessage(error.message, 'error');
+    }
+  });
 
   const form = $('.schedule', node);
   form.name.value = panel.name ?? '';
@@ -134,8 +193,8 @@ function renderPanel(panel) {
           keepAwakeUntil: keepAwake ? new Date(keepAwake).toISOString() : null,
         }),
       });
-      showMessage('Gespeichert. Das Panel übernimmt es beim nächsten Abruf.', 'ok');
-      await loadPanels(true);
+      showMessage('Gespeichert. Das Panel Ã¼bernimmt es beim nÃ¤chsten Abruf.', 'ok');
+      await loadPanels();
     } catch (error) {
       showMessage(error.message, 'error');
     }
@@ -148,8 +207,8 @@ function renderPanel(panel) {
           method: 'POST',
           body: JSON.stringify({ name: button.dataset.command }),
         });
-        showMessage('Befehl vorgemerkt, das Panel führt ihn beim nächsten Abruf aus.', 'ok');
-        await loadPanels(true);
+        showMessage('Befehl vorgemerkt, das Panel fÃ¼hrt ihn beim nÃ¤chsten Abruf aus.', 'ok');
+        await loadPanels();
       } catch (error) {
         showMessage(error.message, 'error');
       }
@@ -159,11 +218,17 @@ function renderPanel(panel) {
   return node;
 }
 
-async function loadPanels(quiet = false) {
+async function loadPanels(background = false) {
+  // Beim Hintergrund-Takt nicht neu zeichnen, solange jemand in einem Feld
+  // tippt - sonst verschwindet die Eingabe unter den Fingern. Ein Knopf im
+  // Fokus ist keine Eingabe: nach einem Klick muss die Karte sich aktualisieren.
+  const active = document.activeElement;
+  const wirdGetippt =
+    active && panelList.contains(active) && ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName);
+  if (background && wirdGetippt) return;
+
   try {
     const { panels } = await api('/api/v1/admin/panels');
-    // Formulare, in denen gerade getippt wird, nicht unter den Fingern ersetzen.
-    if (quiet && panelList.contains(document.activeElement)) return;
 
     panelList.replaceChildren();
     if (panels.length === 0) {
@@ -175,7 +240,7 @@ async function loadPanels(quiet = false) {
     }
     for (const panel of panels) panelList.append(renderPanel(panel));
   } catch (error) {
-    if (!quiet) showMessage(error.message, 'error');
+    if (!background) showMessage(error.message, 'error');
   }
 }
 

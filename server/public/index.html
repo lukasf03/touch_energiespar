@@ -48,6 +48,34 @@
         </dl>
         <p class="warn fallback" hidden></p>
 
+        <section class="maintenance">
+          <h3>Fernwartung</h3>
+          <p class="remote">
+            RustDesk-Kennung:
+            <code class="remote-id">–</code>
+            <button type="button" class="ghost small copy-id" hidden>kopieren</button>
+          </p>
+          <p class="awake-until" hidden></p>
+          <div class="actions">
+            <label class="inline">
+              Wach halten für
+              <select class="maintenance-minutes">
+                <option value="30">30 Minuten</option>
+                <option value="60" selected>1 Stunde</option>
+                <option value="120">2 Stunden</option>
+                <option value="240">4 Stunden</option>
+              </select>
+            </label>
+            <button type="button" class="maintenance-start">Für Wartung wach halten</button>
+            <button type="button" class="ghost maintenance-stop">Wartung beenden</button>
+          </div>
+          <p class="hint">
+            Hält das Panel wach und schaltet den Bildschirm ein, danach gilt wieder der
+            Zeitplan. Liegt das Panel schon im Energiesparmodus, greift das erst, wenn es
+            durch seinen Aufwachzeitgeber von selbst hochkommt.
+          </p>
+        </section>
+
         <form class="schedule">
           <div class="grid">
             <label>Name<input name="name" type="text" maxlength="80" /></label>

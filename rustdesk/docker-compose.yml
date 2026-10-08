@@ -1,0 +1,50 @@
+# Selbst gehosteter RustDesk-Server (Fernwartung des Wandpanels).
+#
+# Aufbau nach der offiziellen Vorlage von rustdesk/rustdesk-server:
+#   hbbs  Vermittlungsserver (ID/Rendezvous), nimmt die Anmeldung der Geraete
+#         entgegen und versucht zuerst eine direkte Verbindung herzustellen.
+#   hbbr  Relay, uebernimmt nur, wenn die direkte Verbindung nicht klappt.
+#
+# Beide Dienste teilen sich ./data. Das ist wichtig: dort liegt das
+# Schluesselpaar, das hbbs beim ersten Start erzeugt. Getrennte Verzeichnisse
+# erzeugen zwei verschiedene Schluessel, und das Relay weist dann jede
+# Verbindung ab.
+
+services:
+  hbbs:
+    image: rustdesk/rustdesk-server:latest
+    container_name: rustdesk-hbbs
+    # RUSTDESK_PUBLIC_HOST muss von aussen erreichbar sein. Ein Eintrag wie
+    # "hbbr" oder "localhost" funktioniert auf dem Server selbst und scheitert
+    # bei jedem Geraet ausserhalb.
+    command: hbbs -r ${RUSTDESK_PUBLIC_HOST:?RUSTDESK_PUBLIC_HOST fehlt}:21117 -k _
+    ports:
+      - '21115:21115'
+      - '21116:21116'
+      - '21116:21116/udp'
+      - '21118:21118'
+    volumes:
+      - ./data:/root
+    networks:
+      - rustdesk
+    depends_on:
+      - hbbr
+    restart: unless-stopped
+
+  hbbr:
+    image: rustdesk/rustdesk-server:latest
+    container_name: rustdesk-hbbr
+    # -k _ verlangt den Schluessel. Ohne diese Angabe kann jeder, der Port
+    # 21117 erreicht, das Relay als offenen Proxy mitbenutzen.
+    command: hbbr -k _
+    ports:
+      - '21117:21117'
+      - '21119:21119'
+    volumes:
+      - ./data:/root
+    networks:
+      - rustdesk
+    restart: unless-stopped
+
+networks:
+  rustdesk:

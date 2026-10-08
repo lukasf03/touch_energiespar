@@ -256,6 +256,7 @@ function Invoke-SyncAction {
             consecutiveWakeFailures = [int]$state.ConsecutiveWakeFailures
             fallbackReason          = $state.FallbackReason
             appliedCommandId        = $state.LastCommandId
+            remoteId                = Get-RemoteAccessId
             sleepStates             = @((Get-SleepStateSupport).Available)
         }) | Out-Null
     }

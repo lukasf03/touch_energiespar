@@ -150,6 +150,85 @@ cd server && npm install && npm test
 
 ---
 
+## Fernwartung (optional)
+
+Um sich aus der Ferne auf das Panel zu schalten, liegt in `rustdesk/` ein
+selbst gehosteter RustDesk-Server. Das Panel baut nur **ausgehende**
+Verbindungen auf – im fremden Netz braucht es damit weder eine Portfreigabe
+noch Zugriff auf den Router.
+
+### Warum RustDesk und nicht RDP
+
+Remotedesktop würde die Konsolensitzung übernehmen: Das Panel an der Wand
+zeigt dann den Sperrbildschirm statt der Strichliste, auch nach dem Trennen.
+RustDesk teilt die **bestehende** Sitzung, die Anzeige bleibt also unberührt.
+
+### Server starten
+
+```bash
+cd rustdesk && cp .env.example .env
+```
+
+In `.env` den öffentlich erreichbaren Namen eintragen, dann:
+
+```bash
+docker compose up -d
+```
+
+Diese Ports müssen von außen erreichbar sein:
+
+| Port | Protokoll | Dienst |
+| --- | --- | --- |
+| 21115 | TCP | hbbs, NAT-Typ-Test |
+| 21116 | **TCP und UDP** | hbbs, Anmeldung und Verbindungsaufbau |
+| 21117 | TCP | hbbr, Relay |
+| 21118 / 21119 | TCP | nur für den Web-Client, sonst zulassen weglassen |
+
+Die UDP-Regel für 21116 wird am häufigsten vergessen – ohne sie funktioniert
+der Verbindungsaufbau nicht.
+
+Beim ersten Start erzeugt hbbs ein Schlüsselpaar in `./data`. Den öffentlichen
+Schlüssel brauchst du für die Clients:
+
+```bash
+cat rustdesk/data/id_ed25519.pub
+```
+
+`-k _` ist in beiden Diensten gesetzt: ohne diese Angabe könnte jeder, der
+Port 21117 erreicht, dein Relay als offenen Proxy mitbenutzen.
+
+### Panel einrichten
+
+RustDesk auf dem Panel installieren, dann unter *Einstellungen → Netzwerk*
+eintragen:
+
+- **ID-Server** und **Relay-Server**: dein Servername
+- **Schlüssel**: Inhalt von `id_ed25519.pub`
+
+Für unbeaufsichtigten Zugriff zusätzlich ein **festes Kennwort** setzen und
+RustDesk als Dienst starten lassen, damit es auch ohne angemeldeten Benutzer
+erreichbar ist.
+
+Meldet sich das Panel danach beim Steuerungsserver, zeigt die Weboberfläche
+seine RustDesk-Kennung samt Kopier-Knopf an – du musst sie dir also nicht
+merken.
+
+### Wach halten für die Wartung
+
+In der Weboberfläche gibt es je Panel **„Für Wartung wach halten"** mit 30
+Minuten bis 4 Stunden. Das Panel bleibt dann wach, der Bildschirm geht an,
+danach gilt automatisch wieder der Zeitplan. **„Wartung beenden"** bricht es
+vorzeitig ab.
+
+**Die Einschränkung, die man kennen muss:** Liegt das Panel bereits im
+Energiesparmodus, erreicht es kein Befehl – es ist schlicht aus. Das
+Wartungsfenster greift dann erst, wenn das Gerät durch seinen
+Aufwachzeitgeber von selbst hochkommt. Wer nachts dran will, setzt das Fenster
+also **vor** der Schlafenszeit. Im Modus `DisplayOnly` entfällt das Problem,
+weil das Gerät durchläuft.
+
+---
+
 ## Installation
 
 1. Den Ordner auf das Panel kopieren, z. B. nach `C:\Tools\WindowsEnergie`.
@@ -293,6 +372,7 @@ zurückgesetzt.
 | `server/public/` | Weboberfläche (ohne Framework) |
 | `server/test/api.test.js` | Tests der Schnittstelle |
 | `server/Dockerfile`, `server/docker-compose.yml` | Container |
+| `rustdesk/docker-compose.yml` | selbst gehosteter Fernwartungs-Server |
 
 Eine Anmerkung zum Server: `node:sqlite` ist in Node noch als experimentell
 markiert und würde eine Warnung ausgeben. Im Container ist sie über
