@@ -630,26 +630,62 @@ function Invoke-SystemSuspend {
 function Get-SleepStateSupport {
     <#
         Liest aus 'powercfg /a' die verfuegbaren Schlafzustaende.
-        Ausgewertet werden nur die sprachunabhaengigen Kennungen S1..S4 / S0.
+
+        Die Ausgabe von powercfg ist uebersetzt, die Kennungen S0..S4 sind es
+        nicht. Ausgewertet wird darum ausschliesslich die Struktur (erster
+        Abschnitt = verfuegbar) und diese Kennungen - die Systemsprache spielt
+        keine Rolle.
+
+        -Raw dient dem Test: damit laesst sich die Auswertung gegen Ausgaben
+        verschiedener Sprachen pruefen, ohne das System umzustellen.
     #>
     [CmdletBinding()]
-    param()
+    param([AllowNull()][string]$Raw)
 
-    $raw = ''
-    try {
-        $raw = (& powercfg.exe /a) -join "`n"
-    } catch {
-        return [pscustomobject]@{ Raw = ''; Available = @(); SupportsStandby = $null; ModernStandby = $null }
+    if ($PSBoundParameters.ContainsKey('Raw')) {
+        $raw = [string]$Raw
+    } else {
+        try {
+            $raw = (& powercfg.exe /a) -join "`n"
+        } catch {
+            return [pscustomobject]@{ Raw = ''; Available = @(); SupportsStandby = $null; ModernStandby = $null }
+        }
     }
 
-    # 'powercfg /a' gibt zuerst die verfuegbaren, danach die nicht verfuegbaren
-    # Zustaende aus. Abschnitte beginnen mit einer nicht eingerueckten Zeile.
+    # Auswertung rein ueber die Struktur, damit die Sprache keine Rolle spielt:
+    #
+    #   Ueberschrift (nicht eingerueckt)
+    #       Standby (S3)                          <- verfuegbar
+    #   Ueberschrift (nicht eingerueckt)
+    #       Standby (S1)                          <- nicht verfuegbar,
+    #           <Begruendung, tiefer eingerueckt>    erkennbar an der
+    #                                                Begruendungszeile
+    #
+    # Beide Merkmale muessen zutreffen: erster Abschnitt UND keine
+    # Begruendungszeile. Gibt es gar keinen verfuegbaren Zustand, besteht die
+    # Ausgabe nur aus dem zweiten Abschnitt - dann darf nichts als verfuegbar
+    # gelten, sonst wuerde das Panel einen Standby versuchen, den das Geraet
+    # nicht beherrscht.
+    $lines = @($raw -split "`r?`n")
     $available = New-Object System.Collections.Generic.List[string]
     $headerCount = 0
-    foreach ($line in ($raw -split "`r?`n")) {
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         if ($line -notmatch '^\s') { $headerCount++; continue }
         if ($headerCount -ne 1) { continue }
+
+        $indent = $line.Length - $line.TrimStart().Length
+        $hasReason = $false
+        for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+            if ([string]::IsNullOrWhiteSpace($lines[$j])) { continue }
+            $nextIndent = $lines[$j].Length - $lines[$j].TrimStart().Length
+            $hasReason = ($nextIndent -gt $indent)
+            break
+        }
+        if ($hasReason) { continue }
+
         if ($line -match '\bS([0-4])\b') { $available.Add('S' + $Matches[1]) }
     }
 
@@ -767,15 +803,49 @@ function Stop-WallSleepTask {
     }
 }
 
-function Test-SuspendPrecondition {
+function Test-WakeTaskMatchesSchedule {
     <#
-        Prueft vor dem ersten Standby, ob ein Aufwachen ueberhaupt zu erwarten
-        ist. Fehlt eine Voraussetzung, bleibt es beim ausgeschalteten Bildschirm.
+        Prueft, ob der Aufwachzeitgeber zur konfigurierten Weckzeit passt.
+
+        Noetig, weil der Zeitplan kurz vor dem Standby noch vom Server kommen
+        kann. Liesse sich die Startzeit der Aufgabe dabei nicht nachziehen
+        (etwa mangels Administratorrechten), wuerde das Panel schlafen gehen
+        und zur alten Zeit aufwachen. Dann ist Durchlaufen die bessere Wahl.
     #>
     [CmdletBinding()]
-    param()
+    param([psobject]$Config = (Get-WallConfig))
+
+    $task = Get-WallTask -Name $script:TaskPrewake
+    if (-not $task) { return $false }
+
+    $trigger = @($task.Triggers) | Select-Object -First 1
+    if (-not $trigger -or -not $trigger.StartBoundary) { return $false }
+
+    $expected = $Config.WakeTimeOfDay - [timespan]::FromMinutes([double]$Config.WakePreRollMinutes)
+    if ($expected -lt [timespan]::Zero) { $expected = $expected.Add([timespan]::FromDays(1)) }
+
+    try {
+        $actual = [datetime]::Parse([string]$trigger.StartBoundary, [cultureinfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind)
+    } catch {
+        return $false
+    }
+    return ($actual.TimeOfDay -eq $expected)
+}
+
+function Test-SuspendPrecondition {
+    <#
+        Prueft vor dem Standby, ob ein Aufwachen ueberhaupt zu erwarten ist.
+        Fehlt eine Voraussetzung, bleibt es beim ausgeschalteten Bildschirm.
+    #>
+    [CmdletBinding()]
+    param([psobject]$Config = (Get-WallConfig))
 
     $reasons = New-Object System.Collections.Generic.List[string]
+
+    if (-not (Test-WakeTaskMatchesSchedule -Config $Config)) {
+        $reasons.Add(("Der Aufwachzeitgeber passt nicht zur Weckzeit {0}." -f $Config.WakeTime))
+    }
 
     $prewake = Get-WallTask -Name $script:TaskPrewake
     $wake    = Get-WallTask -Name $script:TaskWake
@@ -817,7 +887,9 @@ function Get-SyncConfig {
     try {
         $json = Get-Content -LiteralPath $file -Raw -Encoding utf8 | ConvertFrom-Json
     } catch {
-        Write-WallLog -Level ERROR ("sync.json ist unlesbar: {0}" -f $_.Exception.Message)
+        # Erwartbar, wenn diese Sitzung keine erhoehten Rechte hat: die Datei
+        # ist absichtlich nur fuer SYSTEM und Administratoren lesbar.
+        Write-WallLog -Level WARN ("sync.json nicht lesbar: {0}" -f $_.Exception.Message)
         return $null
     }
 
@@ -890,16 +962,64 @@ function Protect-WallFile {
     param([Parameter(Mandatory)][string]$Path)
 
     try {
+        # Bekannte SIDs statt Kontonamen: 'BUILTIN\Administrators' heisst auf
+        # einem deutschen Windows anders und liesse sich nicht aufloesen - die
+        # Datei bliebe dann ungeschuetzt.
+        $system = New-Object System.Security.Principal.SecurityIdentifier(
+            [System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+        $admins = New-Object System.Security.Principal.SecurityIdentifier(
+            [System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+
         $acl = New-Object System.Security.AccessControl.FileSecurity
         $acl.SetAccessRuleProtection($true, $false)
-        foreach ($account in @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+        foreach ($sid in @($system, $admins)) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $account, 'FullControl', 'Allow')))
+                $sid, 'FullControl', 'Allow')))
         }
-        $acl.SetOwner((New-Object System.Security.Principal.NTAccount('BUILTIN\Administrators')))
+        # Besitzer bewusst nicht aendern: das braeuchte erhoehte Rechte und
+        # bringt nichts - entscheidend ist die Zugriffsliste oben.
         Set-Acl -LiteralPath $Path -AclObject $acl
+
+        # Gegenprobe: eine stillschweigend wirkungslose Absicherung waere
+        # schlimmer als gar keine, denn in der Datei steht das API-Token.
+        $check = (Get-Acl -LiteralPath $Path).Access |
+            Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -notin @($system, $admins) }
+        if ($check) {
+            Write-WallLog -Level WARN ("'{0}' ist weiterhin fuer weitere Konten zugaenglich: {1}" -f $Path,
+                (($check | ForEach-Object { $_.IdentityReference.Value }) -join ', '))
+        }
     } catch {
         Write-WallLog -Level WARN ("Zugriffsrechte fuer '{0}' konnten nicht gesetzt werden: {1}" -f $Path, $_.Exception.Message)
+    }
+}
+
+function Grant-WallDataAccess {
+    <#
+        Gibt dem Panel-Konto Schreibrecht auf das Datenverzeichnis.
+
+        Noetig, weil die Aufgaben Sleep und Wake in der Benutzersitzung laufen
+        und dort Konfiguration und Zustand schreiben. Unter C:\ProgramData darf
+        ein Standardbenutzer sonst nur eigene Dateien aendern, nicht die von
+        SYSTEM angelegten.
+
+        sync.json bleibt davon unberuehrt: Protect-WallFile schaltet dort die
+        Vererbung ab, das Token bleibt also SYSTEM und Administratoren
+        vorbehalten.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$UserId)
+
+    $root = Confirm-WallDataRoot
+    try {
+        $acl = Get-Acl -LiteralPath $root
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $UserId, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        Set-Acl -LiteralPath $root -AclObject $acl
+        Write-WallLog ("Schreibrecht auf '{0}' fuer '{1}' gesetzt." -f $root, $UserId)
+        return $true
+    } catch {
+        Write-WallLog -Level WARN ("Schreibrecht fuer '{0}' konnte nicht gesetzt werden: {1}" -f $UserId, $_.Exception.Message)
+        return $false
     }
 }
 
@@ -1163,6 +1283,31 @@ function Update-WallTaskTime {
     }
 }
 
+function Wait-WallTask {
+    <#
+        Wartet, bis eine Aufgabe nicht mehr laeuft. Rueckgabe $true, wenn sie
+        innerhalb der Frist fertig wurde.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [int]$TimeoutSeconds = 45
+    )
+
+    # Kurz warten: direkt nach dem Start meldet die Aufgabe noch 'Ready'.
+    Start-Sleep -Seconds 1
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $task = Get-WallTask -Name $Name
+        if (-not $task) { return $false }
+        if ($task.State -ne 'Running') { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-WallLog -Level WARN ("Aufgabe '{0}' laeuft nach {1} s immer noch." -f $Name, $TimeoutSeconds)
+    return $false
+}
+
 function Start-WallTask {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name)
@@ -1178,6 +1323,30 @@ function Start-WallTask {
     } catch {
         Write-WallLog -Level ERROR ("Aufgabe '{0}' konnte nicht gestartet werden: {1}" -f $Name, $_.Exception.Message)
         return $false
+    }
+}
+
+function Get-SystemLanguageInfo {
+    <#
+        Reine Diagnose. Die Steuerung selbst wertet keinen uebersetzten Text
+        aus: Konten werden ueber SIDs angesprochen, Energieoptionen ueber
+        GUIDs, Schlafzustaende ueber die Kennungen S0..S4. Die Sprache des
+        Geraets ist also ohne Belang - angezeigt wird sie nur, damit man bei
+        einer Stoerung sofort sieht, womit man es zu tun hat.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $ui = $null
+    $display = $null
+    try { $ui = [System.Globalization.CultureInfo]::InstalledUICulture.Name } catch { }
+    try { $display = (Get-Culture).Name } catch { }
+
+    [pscustomobject]@{
+        UiCulture      = $ui
+        FormatCulture  = $display
+        # Die Steuerung haengt bewusst an keiner dieser Angaben.
+        AffectsLogic   = $false
     }
 }
 
@@ -1199,8 +1368,9 @@ Export-ModuleMember -Function @(
     'Initialize-WallNative', 'Set-DisplayPower', 'Invoke-SystemSuspend',
     'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Set-WallPowerPolicy',
     'Get-WallTaskNames', 'Get-WallTask', 'Stop-WallSleepTask', 'Test-SuspendPrecondition',
+    'Test-WakeTaskMatchesSchedule', 'Grant-WallDataAccess', 'Get-SystemLanguageInfo',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',
     'ConvertTo-ValidatedSchedule', 'Send-WallHeartbeat', 'Get-WallAgentVersion', 'Get-RemoteAccessId',
-    'New-WallDailyTrigger', 'Update-WallTaskTime', 'Start-WallTask',
+    'New-WallDailyTrigger', 'Update-WallTaskTime', 'Start-WallTask', 'Wait-WallTask',
     'Test-WallAdmin'
 )

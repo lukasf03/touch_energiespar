@@ -133,6 +133,11 @@ if (-not $PSBoundParameters.ContainsKey('UserId') -or [string]::IsNullOrWhiteSpa
     Write-Host ('Anzeige-Konto : {0}' -f $UserId)
 }
 
+# Sleep und Wake laufen in der Sitzung dieses Kontos und schreiben dort
+# Konfiguration und Zustand - unter C:\ProgramData braucht es dafuer ein
+# ausdrueckliches Schreibrecht.
+Grant-WallDataAccess -UserId $UserId | Out-Null
+
 
 # ------------------------------------------------------------------ 4. Aufgaben
 

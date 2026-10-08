@@ -65,19 +65,18 @@ function Invoke-SleepAction {
         return
     }
 
+    # Letzte Abfrage vor dem Standby. Sie liegt bewusst vor der Wartezeit, also
+    # rund eine Minute vor dem Einschlafen: Im Standby ist das Panel nicht mehr
+    # erreichbar, eine Aenderung der letzten Minuten wuerde sonst erst am
+    # naechsten Morgen ankommen.
+    Invoke-FinalScheduleCheck
+
     if ($mode -eq 'Combined' -and [int]$config.DisplayOffDelaySeconds -gt 0) {
         Write-WallLog ('Standby in {0} s.' -f [int]$config.DisplayOffDelaySeconds)
         if (-not (Wait-WallInterval -Seconds ([int]$config.DisplayOffDelaySeconds))) {
             Write-WallLog 'Weck-Signal vor dem Standby empfangen, Nachtbetrieb abgebrochen.'
             return
         }
-    }
-
-    $precondition = Test-SuspendPrecondition
-    if (-not $precondition.Ok) {
-        Write-WallLog -Level WARN ('Standby uebersprungen: {0}' -f ($precondition.Reasons -join ' '))
-        Invoke-KeepDisplayOff
-        return
     }
 
     $retries = 0
@@ -94,6 +93,16 @@ function Invoke-SleepAction {
         $wakeTarget = Get-NextOccurrence -TimeOfDay $config.WakeTimeOfDay
         $margin = [timespan]::FromMinutes([double]$config.WakePreRollMinutes + 1)
         if ((Get-Date) -ge ($wakeTarget - $margin)) { break }
+
+        # Erst hier pruefen, nicht vor der Wartezeit: Der Zeitplan kann sich
+        # bei der letzten Abfrage gerade geaendert haben, und dann muss auch
+        # der Aufwachzeitgeber zur neuen Weckzeit passen.
+        $precondition = Test-SuspendPrecondition -Config $config
+        if (-not $precondition.Ok) {
+            Write-WallLog -Level WARN ('Standby uebersprungen: {0}' -f ($precondition.Reasons -join ' '))
+            Invoke-KeepDisplayOff
+            return
+        }
 
         Set-DisplayPower -State Off -Quiet
 
@@ -130,9 +139,51 @@ function Invoke-SleepAction {
 
         Write-WallLog -Level WARN 'Unerwartetes Aufwachen vor der Weckzeit, erneuter Standby in 15 s.'
         if (-not (Wait-WallInterval -Seconds 15)) { return }
+
+        # Das Geraet war eine Weile weg und hat dabei jeden regulaeren Abruf
+        # verpasst. Vor dem erneuten Einschlafen also nochmal nachfragen.
+        Invoke-FinalScheduleCheck
     }
 
     Write-WallLog 'Nachtbetrieb regulaer beendet (Weckzeit erreicht).'
+}
+
+function Invoke-FinalScheduleCheck {
+    <#
+        Letzte Abfrage des Zeitplans, bevor das Panel in den Standby geht.
+        Ohne eingerichtete Fernsteuerung passiert nichts.
+
+        Zwei Wege, weil diese Aufgabe in der Benutzersitzung laeuft:
+
+        1. Darf diese Sitzung die Zugangsdaten lesen (SYSTEM oder erhoehte
+           Rechte), wird direkt abgefragt.
+        2. Sonst wird die Abgleich-Aufgabe angestossen. Sie laeuft als SYSTEM,
+           darf also sowohl das Token lesen als auch die Startzeiten der
+           Aufgaben nachziehen - was ein gewoehnlicher Benutzer nicht kann.
+           Danach steht das Ergebnis in config.json und wird von hier gelesen.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-Path -LiteralPath (Get-WallPaths).SyncFile)) { return }
+
+    Write-WallLog 'Letzte Abfrage des Zeitplans vor dem Standby.'
+
+    $sync = Get-SyncConfig
+    if ($sync) {
+        Update-ScheduleFromServer -Sync $sync | Out-Null
+        return
+    }
+
+    $tasks = Get-WallTaskNames
+    Write-WallLog 'Zugangsdaten hier nicht lesbar, Abgleich-Aufgabe uebernimmt die Abfrage.'
+    if (-not (Start-WallTask -Name $tasks.Sync)) {
+        Write-WallLog -Level WARN 'Abfrage vor dem Standby nicht moeglich, es gilt der zuletzt bekannte Zeitplan.'
+        return
+    }
+    if (Wait-WallTask -Name $tasks.Sync -TimeoutSeconds 45) {
+        Write-WallLog 'Abgleich-Aufgabe fertig, Zeitplan ist aktuell.'
+    }
 }
 
 function Invoke-KeepDisplayOff {
@@ -206,35 +257,48 @@ function Invoke-PrewakeAction {
 
 # ------------------------------------------------------------------ Fernsteuerung
 
+function Update-ScheduleFromServer {
+    <#
+        Holt den Zeitplan vom Server und uebernimmt ihn. Rueckgabe $true bei
+        Erfolg, $false bei Netz- oder Validierungsfehlern sowie dann, wenn gar
+        keine Fernsteuerung eingerichtet ist.
+
+        Wirft nie: bei einem Fehler bleibt der letzte gueltige Zeitplan in
+        Kraft. Ein Rueckfall auf "immer an" ist bewusst ausgeschlossen, das
+        waere genau der Zustand, der vermieden werden soll.
+    #>
+    [CmdletBinding()]
+    param([psobject]$Sync = (Get-SyncConfig))
+
+    if (-not $Sync) { return $false }
+
+    try {
+        $raw = Get-RemoteSchedule -Sync $Sync
+        $schedule = ConvertTo-ValidatedSchedule -Raw $raw
+        Set-WallScheduleFromRemote -Schedule $schedule
+
+        $state = Get-WallState
+        $state.SyncLastSuccessUtc = (Get-Date).ToUniversalTime().ToString('o')
+        $state.SyncConsecutiveFailures = 0
+        $state.SyncLastError = $null
+        Save-WallState $state
+        return $true
+    } catch {
+        $state = Get-WallState
+        $count = [int]$state.SyncConsecutiveFailures + 1
+        $state.SyncConsecutiveFailures = $count
+        $state.SyncLastError = $_.Exception.Message
+        Save-WallState $state
+
+        $level = if ($count -ge 12) { 'ERROR' } else { 'WARN' }
+        Write-WallLog -Level $level ('Abgleich fehlgeschlagen ({0}x in Folge), es gilt weiter der letzte gueltige Zeitplan: {1}' -f $count, $_.Exception.Message)
+        return $false
+    }
+}
+
 function Invoke-SyncAction {
     $sync = Get-SyncConfig
-
-    if ($sync) {
-        try {
-            $raw = Get-RemoteSchedule -Sync $sync
-            $schedule = ConvertTo-ValidatedSchedule -Raw $raw
-            Set-WallScheduleFromRemote -Schedule $schedule
-
-            $state = Get-WallState
-            $state.SyncLastSuccessUtc = (Get-Date).ToUniversalTime().ToString('o')
-            $state.SyncConsecutiveFailures = 0
-            $state.SyncLastError = $null
-            Save-WallState $state
-        } catch {
-            # Bei Netz- oder Validierungsfehlern bleibt der letzte gueltige
-            # Zeitplan in Kraft. Niemals auf "immer an" zurueckfallen, das waere
-            # genau der Zustand, der vermieden werden soll.
-            $state = Get-WallState
-            $count = [int]$state.SyncConsecutiveFailures + 1
-            $state.SyncConsecutiveFailures = $count
-            $state.SyncLastError = $_.Exception.Message
-            Save-WallState $state
-
-            $level = if ($count -ge 12) { 'ERROR' } else { 'WARN' }
-            Write-WallLog -Level $level ('Abgleich fehlgeschlagen ({0}x in Folge), es gilt weiter der letzte gueltige Zeitplan: {1}' -f $count, $_.Exception.Message)
-        }
-    }
-
+    Update-ScheduleFromServer -Sync $sync | Out-Null
     Invoke-Reconcile
 
     if ($sync) {
@@ -482,6 +546,9 @@ function Invoke-StatusAction {
     $wakeTimers = Get-WakeTimerSetting
     $wakeText = switch ($wakeTimers) { $true { 'erlaubt' } $false { 'DEAKTIVIERT' } default { 'nicht ermittelbar' } }
     Write-Host ('  Aufwachzeitgeber      : {0}' -f $wakeText) -ForegroundColor $(if ($wakeTimers -eq $false) { 'Red' } else { 'Gray' })
+
+    $lang = Get-SystemLanguageInfo
+    Write-Host ('  Systemsprache         : {0} (ohne Einfluss: Konten ueber SIDs, Energieoptionen ueber GUIDs)' -f $lang.UiCulture) -ForegroundColor DarkGray
 
     Write-Host ''
     Write-Host ('Protokoll: {0}' -f $paths.LogFile)

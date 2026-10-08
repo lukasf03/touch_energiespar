@@ -11,6 +11,12 @@ weckt das Gerät nachts nicht auf.
 Getestet für **Windows 10 IoT Enterprise** (funktioniert ebenso unter Windows 10
 und 11 Pro/Enterprise).
 
+Die **Systemsprache spielt keine Rolle**: Konten werden über SIDs angesprochen,
+Energieoptionen über GUIDs, und die Schlafzustände werden über die Kennungen
+`S0`–`S4` sowie die Struktur der Ausgabe erkannt, nicht über übersetzten Text.
+Englisch, Deutsch und jede andere Sprache verhalten sich identisch. `-Action
+Status` zeigt die erkannte Sprache rein zur Information an.
+
 ---
 
 ## Wie es funktioniert
@@ -106,6 +112,27 @@ lokalen `config.json`.
 - **Wach bleiben bis** – einmalige Ausnahme, z. B. für eine Gruppenstunde
 - **Jetzt aufwecken** – Tagbetrieb bis zur nächsten regulären Schlafenszeit
 - **Jetzt schlafen** – Nachtbetrieb bis zur nächsten regulären Weckzeit
+
+### Letzte Abfrage vor dem Standby
+
+Zusätzlich zum 5-Minuten-Takt fragt das Panel **unmittelbar vor dem
+Einschlafen** noch einmal nach – also rund eine Minute vorher, wenn der
+Bildschirm schon aus ist. Ohne das würde eine Änderung um 21:58 verschlafen,
+wenn der letzte reguläre Abruf um 21:57 lief: danach ist das Gerät bis zum
+Morgen nicht mehr erreichbar.
+
+Kommt dabei ein neuer Zeitplan an, wird vor dem Standby geprüft, ob der
+Aufwachzeitgeber auch wirklich zur neuen Weckzeit passt. Passt er nicht,
+bleibt es bei **Bildschirm aus** statt Standby – sonst würde das Panel zur
+alten Zeit aufwachen.
+
+Wacht das Gerät nachts unerwartet auf, fragt es vor dem erneuten Einschlafen
+noch einmal nach, weil es in der Zwischenzeit jeden regulären Abruf verpasst
+hat.
+
+Diese Abfrage läuft über die Abgleich-Aufgabe als SYSTEM, denn die
+Zugangsdaten sind absichtlich nur für SYSTEM und Administratoren lesbar und
+das Ändern der Aufgaben-Startzeiten braucht ohnehin erhöhte Rechte.
 
 ### Wann eine Änderung greift
 
