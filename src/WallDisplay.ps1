@@ -52,11 +52,11 @@ function Invoke-SleepAction {
     }
 
     $mode = Resolve-EffectiveMode -Config $config -State $state
-    $wakeTarget = Get-NextOccurrence -TimeOfDay $config.WakeTimeOfDay
-    $margin = [timespan]::FromMinutes([double]$config.WakePreRollMinutes + 1)
+    $wakeTarget = Get-NextWindowStart -Windows $config.Windows
 
     Remove-WallSignal
-    Write-WallLog ('Nachtbetrieb beginnt. Modus={0}, Weckzeit={1:dd.MM.yyyy HH:mm}' -f $mode, $wakeTarget)
+    Write-WallLog ('Ruhebetrieb beginnt. Modus={0}, naechstes Fenster ab {1}' -f $mode,
+        $(if ($wakeTarget) { $wakeTarget.ToString('dddd dd.MM. HH:mm') } else { 'unbekannt' }))
 
     Set-DisplayPower -State Off
 
@@ -90,14 +90,20 @@ function Invoke-SleepAction {
             break
         }
 
-        $wakeTarget = Get-NextOccurrence -TimeOfDay $config.WakeTimeOfDay
+        $wakeTarget = Get-NextWindowStart -Windows $config.Windows
+        if (-not $wakeTarget) {
+            Write-WallLog -Level WARN 'Der Wochenplan enthaelt kein naechstes Fenster, kein Standby.'
+            Invoke-KeepDisplayOff
+            return
+        }
+
         $margin = [timespan]::FromMinutes([double]$config.WakePreRollMinutes + 1)
         if ((Get-Date) -ge ($wakeTarget - $margin)) { break }
 
         # Erst hier pruefen, nicht vor der Wartezeit: Der Zeitplan kann sich
-        # bei der letzten Abfrage gerade geaendert haben, und dann muss auch
-        # der Aufwachzeitgeber zur neuen Weckzeit passen.
-        $precondition = Test-SuspendPrecondition -Config $config
+        # bei der letzten Abfrage gerade geaendert haben, und dann muessen auch
+        # die Aufwach-Ausloeser zum neuen Wochenplan passen.
+        $precondition = Test-SuspendPrecondition -Config $config -State $state
         if (-not $precondition.Ok) {
             Write-WallLog -Level WARN ('Standby uebersprungen: {0}' -f ($precondition.Reasons -join ' '))
             Invoke-KeepDisplayOff
@@ -308,8 +314,7 @@ function Invoke-SyncAction {
             agentVersion            = Get-WallAgentVersion
             computerName            = $env:COMPUTERNAME
             reportedAtUtc           = (Get-Date).ToUniversalTime().ToString('o')
-            configuredSleepTime     = $config.SleepTime
-            configuredWakeTime      = $config.WakeTime
+            configuredSchedule      = Format-WallSchedule -Windows $config.Windows
             configuredMode          = $config.Mode
             effectiveMode           = Resolve-EffectiveMode -Config $config -State $state
             enabled                 = [bool]$config.Enabled
@@ -338,13 +343,12 @@ function Set-WallScheduleFromRemote {
     $changes = New-Object System.Collections.Generic.List[string]
     $values = @{}
 
-    if ($config.SleepTime -ne $Schedule.SleepTime) {
-        $changes.Add(('Schlafenszeit {0} -> {1}' -f $config.SleepTime, $Schedule.SleepTime))
-        $values['SleepTime'] = $Schedule.SleepTime
-    }
-    if ($config.WakeTime -ne $Schedule.WakeTime) {
-        $changes.Add(('Weckzeit {0} -> {1}' -f $config.WakeTime, $Schedule.WakeTime))
-        $values['WakeTime'] = $Schedule.WakeTime
+    $before = Format-WallSchedule -Windows $config.Windows
+    $after = Format-WallSchedule -Windows $Schedule.Windows
+    $scheduleChanged = ($before -ne $after)
+    if ($scheduleChanged) {
+        $changes.Add(('Wochenplan {0} -> {1}' -f $before, $after))
+        $values['Schedule'] = $Schedule.Schedule
     }
     if ($config.Mode -ne $Schedule.Mode) {
         $changes.Add(('Modus {0} -> {1}' -f $config.Mode, $Schedule.Mode))
@@ -378,16 +382,27 @@ function Set-WallScheduleFromRemote {
         $effective = Get-WallConfig
         switch ($Schedule.CommandName) {
             'sleep-now' {
-                $until = Get-NextOccurrence -TimeOfDay $effective.WakeTimeOfDay
-                $state.CommandSleepUntilUtc = $until.ToUniversalTime().ToString('o')
-                $state.CommandAwakeUntilUtc = $null
-                Write-WallLog ('Befehl "sleep-now" angenommen, Nachtbetrieb bis {0:dd.MM. HH:mm}.' -f $until)
+                # Bis zum Beginn des naechsten Aktiv-Fensters schlafen.
+                $until = Get-NextWindowStart -Windows $effective.Windows
+                if ($until) {
+                    $state.CommandSleepUntilUtc = $until.ToUniversalTime().ToString('o')
+                    $state.CommandAwakeUntilUtc = $null
+                    Write-WallLog ('Befehl "sleep-now" angenommen, Ruhebetrieb bis {0:dd.MM. HH:mm}.' -f $until)
+                }
             }
             'wake-now' {
-                $until = Get-NextOccurrence -TimeOfDay $effective.SleepTimeOfDay
-                $state.CommandAwakeUntilUtc = $until.ToUniversalTime().ToString('o')
-                $state.CommandSleepUntilUtc = $null
-                Write-WallLog ('Befehl "wake-now" angenommen, Tagbetrieb bis {0:dd.MM. HH:mm}.' -f $until)
+                # Bis zum Ende des laufenden Fensters wach bleiben; liegt
+                # gerade keines an, bis zum Ende des naechsten.
+                $until = Get-CurrentWindowEnd -Windows $effective.Windows
+                if (-not $until) {
+                    $start = Get-NextWindowStart -Windows $effective.Windows
+                    if ($start) { $until = Get-CurrentWindowEnd -Windows $effective.Windows -Now $start }
+                }
+                if ($until) {
+                    $state.CommandAwakeUntilUtc = $until.ToUniversalTime().ToString('o')
+                    $state.CommandSleepUntilUtc = $null
+                    Write-WallLog ('Befehl "wake-now" angenommen, Betrieb bis {0:dd.MM. HH:mm}.' -f $until)
+                }
             }
             default {
                 $state.CommandAwakeUntilUtc = $null
@@ -399,9 +414,47 @@ function Set-WallScheduleFromRemote {
 
     Save-WallState $state
 
-    if ($values.ContainsKey('SleepTime') -or $values.ContainsKey('WakeTime')) {
+    if ($scheduleChanged) {
         Update-WallTaskTimesFromConfig
     }
+}
+
+function Format-WallSchedule {
+    <#
+        Kurzfassung des Wochenplans fuer Protokoll und Anzeige, z. B.
+        "Mo-Do 18:00-22:00, Fr-Sa 17:00-02:00, So 16:00-23:00".
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Windows)
+
+    if (-not $Windows) { return '(leer)' }
+
+    $kurz = @{
+        Monday = 'Mo'; Tuesday = 'Di'; Wednesday = 'Mi'; Thursday = 'Do'
+        Friday = 'Fr'; Saturday = 'Sa'; Sunday = 'So'
+    }
+    $reihenfolge = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+
+    # Aufeinanderfolgende Tage mit gleichen Zeiten zusammenfassen.
+    $gruppen = @()
+    foreach ($day in $reihenfolge) {
+        $window = $Windows[$day]
+        $text = if ($window) { '{0:hh\:mm}-{1:hh\:mm}' -f $window.On, $window.Off } else { 'aus' }
+
+        if ($gruppen.Count -gt 0 -and $gruppen[-1].Text -eq $text) {
+            $gruppen[-1].Bis = $day
+        } else {
+            $gruppen += @{ Von = $day; Bis = $day; Text = $text }
+        }
+    }
+
+    $teile = foreach ($g in $gruppen) {
+        if ($g.Text -eq 'aus') { continue }
+        $tage = if ($g.Von -eq $g.Bis) { $kurz[$g.Von] } else { '{0}-{1}' -f $kurz[$g.Von], $kurz[$g.Bis] }
+        '{0} {1}' -f $tage, $g.Text
+    }
+    if (-not $teile) { return '(kein Fenster)' }
+    return ($teile -join ', ')
 }
 
 function Update-WallTaskTimesFromConfig {
@@ -420,11 +473,21 @@ function Update-WallTaskTimesFromConfig {
 
     $config = Get-WallConfig
     $tasks = Get-WallTaskNames
-    $today = [datetime]::Today
 
-    Update-WallTaskTime -Name $tasks.Sleep   -At $today.Add($config.SleepTimeOfDay) | Out-Null
-    Update-WallTaskTime -Name $tasks.Prewake -At $today.Add($config.WakeTimeOfDay).AddMinutes(-[double]$config.WakePreRollMinutes) | Out-Null
-    Update-WallTaskTime -Name $tasks.Wake    -At $today.Add($config.WakeTimeOfDay) | Out-Null
+    $ok = $true
+    foreach ($entry in @(
+        @{ Name = $tasks.Sleep;   Kind = 'Sleep' },
+        @{ Name = $tasks.Prewake; Kind = 'Prewake' },
+        @{ Name = $tasks.Wake;    Kind = 'Wake' }
+    )) {
+        if (-not (Update-WallTaskTriggers -Name $entry.Name -Config $config -Kind $entry.Kind)) { $ok = $false }
+    }
+
+    # Nur wenn wirklich alle Ausloeser sitzen, gilt der Zeitplan als umgesetzt.
+    # Der Fingerabdruck ist die Grundlage dafuer, ob ein Standby gewagt wird.
+    $state = Get-WallState
+    $state.TaskScheduleFingerprint = if ($ok) { Get-ScheduleFingerprint -Config $config } else { $null }
+    Save-WallState $state
 }
 
 function Invoke-Reconcile {
@@ -475,12 +538,30 @@ function Invoke-StatusAction {
     Write-Host ''
     Write-Host 'Konfiguration'
     Write-Host ('  Datei                 : {0}' -f $(if ($config.SourceFile) { $config.SourceFile } else { '(Standardwerte)' }))
-    Write-Host ('  Schlafen ab           : {0}' -f $config.SleepTime)
-    Write-Host ('  Aufwachen um          : {0}' -f $config.WakeTime)
+    Write-Host '  Wochenplan (Panel AN) :'
+    $kurz = @{ Monday = 'Mo'; Tuesday = 'Di'; Wednesday = 'Mi'; Thursday = 'Do'; Friday = 'Fr'; Saturday = 'Sa'; Sunday = 'So' }
+    foreach ($day in @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')) {
+        $window = $config.Windows[$day]
+        if ($window) {
+            $hinweis = if ($window.CrossesMidnight) { ' (bis zum Folgetag)' } else { '' }
+            Write-Host ('      {0}  {1:hh\:mm} - {2:hh\:mm}{3}' -f $kurz[$day], $window.On, $window.Off, $hinweis)
+        } else {
+            Write-Host ('      {0}  aus' -f $kurz[$day]) -ForegroundColor DarkGray
+        }
+    }
     Write-Host ('  Modus (konfiguriert)  : {0}' -f $config.Mode)
     Write-Host ('  Modus (aktiv)         : {0}' -f $mode) -ForegroundColor $(if ($mode -eq $config.Mode) { 'Green' } else { 'Yellow' })
     Write-Host ('  Zeitplan aktiv        : {0}' -f $(if ($config.Enabled) { 'ja' } else { 'NEIN' })) -ForegroundColor $(if ($config.Enabled) { 'Gray' } else { 'Yellow' })
-    Write-Host ('  Jetzt Nachtbetrieb    : {0}' -f $(if (Test-InsideSleepWindow -Config $config -State $state) { 'ja' } else { 'nein' }))
+
+    $schlaeft = Test-InsideSleepWindow -Config $config -State $state
+    Write-Host ('  Panel soll jetzt      : {0}' -f $(if ($schlaeft) { 'schlafen' } else { 'AN sein' })) -ForegroundColor $(if ($schlaeft) { 'Gray' } else { 'Green' })
+    if ($schlaeft) {
+        $next = Get-NextWindowStart -Windows $config.Windows
+        Write-Host ('  Naechstes Fenster ab  : {0}' -f $(if ($next) { $next.ToString('dddd dd.MM. HH:mm') } else { '-' }))
+    } else {
+        $end = Get-CurrentWindowEnd -Windows $config.Windows
+        Write-Host ('  Fenster endet         : {0}' -f $(if ($end) { $end.ToString('dddd dd.MM. HH:mm') } else { '- (uebersteuert)' }))
+    }
 
     Write-Host ''
     Write-Host 'Fernsteuerung'

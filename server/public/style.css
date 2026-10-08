@@ -172,6 +172,42 @@ button:hover { filter: brightness(1.08); }
   margin: 12px 0 0;
 }
 
+.week {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.week legend {
+  padding: 0 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.week-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.week-row:last-of-type { border-bottom: none; }
+.week-row.inactive { opacity: 0.5; }
+
+.week-row .day-toggle {
+  flex: 0 0 11em;
+  margin: 0;
+}
+
+.week-row .day-note {
+  font-size: 0.8rem;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
 .maintenance {
   margin: 0 0 20px;
   padding: 16px;

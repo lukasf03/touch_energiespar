@@ -33,6 +33,18 @@
 
     <p id="message" role="status" hidden></p>
 
+    <template id="weekday-template">
+      <div class="week-row">
+        <label class="check day-toggle">
+          <input type="checkbox" class="day-active" />
+          <span class="day-name"></span>
+        </label>
+        <label class="inline">an ab <input type="time" class="day-on" /></label>
+        <label class="inline">aus um <input type="time" class="day-off" /></label>
+        <span class="day-note"></span>
+      </div>
+    </template>
+
     <template id="panel-template">
       <article class="panel">
         <div class="panel-head">
@@ -79,8 +91,6 @@
         <form class="schedule">
           <div class="grid">
             <label>Name<input name="name" type="text" maxlength="80" /></label>
-            <label>Schlafen ab<input name="sleepTime" type="time" required /></label>
-            <label>Aufwachen um<input name="wakeTime" type="time" required /></label>
             <label>
               Modus
               <select name="mode">
@@ -90,6 +100,15 @@
               </select>
             </label>
           </div>
+
+          <fieldset class="week">
+            <legend>Zeiten, zu denen das Panel an ist</legend>
+            <div class="week-rows"></div>
+            <p class="hint">
+              Ist „aus um“ früher als „an ab“, läuft das Fenster über Mitternacht
+              in den Folgetag. Ein Tag ohne Haken bleibt ganz aus.
+            </p>
+          </fieldset>
           <label class="check">
             <input name="enabled" type="checkbox" />
             Zeitplan aktiv

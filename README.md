@@ -3,10 +3,22 @@
 Steuerung für ein an der Wand montiertes Windows-Touchpanel, das dauerhaft eine
 Seite anzeigt (hier: `https://strichliste.dpsg-franziskus.de/#/monitor`).
 
-Ab einer eingestellten Uhrzeit geht der Bildschirm aus und das Gerät in den
-Energiesparmodus, zu einer zweiten Uhrzeit wacht es von selbst wieder auf und
-schaltet den Bildschirm ein. Rein zeitgesteuert – eine Berührung des Panels
-weckt das Gerät nachts nicht auf.
+Ein Wochenplan legt fest, wann das Panel **an** ist. Außerhalb dieser Fenster
+geht der Bildschirm aus und das Gerät in den Energiesparmodus; zum nächsten
+Fensterbeginn wacht es von selbst wieder auf. Rein zeitgesteuert – eine
+Berührung weckt das Gerät außerhalb der Fenster nicht auf.
+
+Standardplan:
+
+| Tag | an ab | aus um |
+| --- | --- | --- |
+| Montag bis Donnerstag | 18:00 | 22:00 |
+| Freitag | 17:00 | 02:00 (Samstag) |
+| Samstag | 17:00 | 02:00 (Sonntag) |
+| Sonntag | 16:00 | 23:00 |
+
+Freitag und Samstag laufen über Mitternacht. Sonntag ist das Panel dadurch
+zweimal an: 00:00–02:00 aus dem Samstags-Fenster und dann wieder ab 16:00.
 
 Getestet für **Windows 10 IoT Enterprise** (funktioniert ebenso unter Windows 10
 und 11 Pro/Enterprise).
@@ -25,9 +37,9 @@ Drei geplante Aufgaben greifen ineinander:
 
 | Aufgabe | Zeitpunkt | Konto | Zweck |
 | --- | --- | --- | --- |
-| `\WallDisplayPower\Sleep` | Schlafenszeit | angemeldeter Benutzer | Bildschirm aus, danach Standby |
-| `\WallDisplayPower\WakeTimer` | Weckzeit − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
-| `\WallDisplayPower\Wake` | Weckzeit | angemeldeter Benutzer | Bildschirm ein, Nacht-Aufgabe beenden |
+| `\WallDisplayPower\Sleep` | Fensterende | angemeldeter Benutzer | Bildschirm aus, danach Standby |
+| `\WallDisplayPower\WakeTimer` | Fensterbeginn − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
+| `\WallDisplayPower\Wake` | Fensterbeginn | angemeldeter Benutzer | Bildschirm ein, Ruhe-Aufgabe beenden |
 | `\WallDisplayPower\Sync` | alle 5 Minuten | SYSTEM | Zeitplan vom Server holen, Zustand abgleichen (optional) |
 
 Warum diese Aufteilung:
@@ -44,8 +56,8 @@ Warum diese Aufteilung:
 ### Betriebsmodi
 
 - **`Combined`** (Standard): Bildschirm aus, nach 60 Sekunden Standby. Wacht das
-  Gerät vor der Weckzeit unerwartet auf (z. B. durch Windows-Wartung), schaltet
-  es den Bildschirm sofort wieder aus und geht erneut in den Standby.
+  Gerät vor dem nächsten Fenster unerwartet auf (z. B. durch Windows-Wartung),
+  schaltet es den Bildschirm sofort wieder aus und geht erneut in den Standby.
 - **`DisplayOnly`**: nur Bildschirm aus, kein Standby. Das Gerät bleibt im Netz
   erreichbar, die angezeigte Seite bleibt geladen. Ein Wächter schaltet den
   Bildschirm alle 20 Sekunden erneut aus, damit Streu-Eingaben des
@@ -107,11 +119,12 @@ lokalen `config.json`.
 
 ### Was sich einstellen lässt
 
-- Schlafenszeit, Weckzeit, Modus
+- Wochenplan: je Tag an/aus mit Uhrzeiten, einzelne Tage abwählbar
+- Modus
 - Zeitplan aktiv / aus (`enabled`)
 - **Wach bleiben bis** – einmalige Ausnahme, z. B. für eine Gruppenstunde
-- **Jetzt aufwecken** – Tagbetrieb bis zur nächsten regulären Schlafenszeit
-- **Jetzt schlafen** – Nachtbetrieb bis zur nächsten regulären Weckzeit
+- **Jetzt aufwecken** – an bis zum Ende des laufenden bzw. nächsten Fensters
+- **Jetzt schlafen** – aus bis zum Beginn des nächsten Fensters
 
 ### Letzte Abfrage vor dem Standby
 
@@ -119,36 +132,36 @@ Zusätzlich zum 5-Minuten-Takt fragt das Panel **unmittelbar vor dem
 Einschlafen** noch einmal nach – also rund eine Minute vorher, wenn der
 Bildschirm schon aus ist. Ohne das würde eine Änderung um 21:58 verschlafen,
 wenn der letzte reguläre Abruf um 21:57 lief: danach ist das Gerät bis zum
-Morgen nicht mehr erreichbar.
+nächsten Fenster nicht mehr erreichbar.
 
-Kommt dabei ein neuer Zeitplan an, wird vor dem Standby geprüft, ob der
-Aufwachzeitgeber auch wirklich zur neuen Weckzeit passt. Passt er nicht,
-bleibt es bei **Bildschirm aus** statt Standby – sonst würde das Panel zur
-alten Zeit aufwachen.
+Kommt dabei ein neuer Wochenplan an, wird vor dem Standby geprüft, ob die
+Aufwach-Auslöser auch wirklich dazu passen. Passen sie nicht, bleibt es bei
+**Bildschirm aus** statt Standby – sonst würde das Panel zur alten Zeit
+aufwachen.
 
-Wacht das Gerät nachts unerwartet auf, fragt es vor dem erneuten Einschlafen
+Wacht das Gerät außerplanmäßig auf, fragt es vor dem erneuten Einschlafen
 noch einmal nach, weil es in der Zwischenzeit jeden regulären Abruf verpasst
 hat.
 
 Diese Abfrage läuft über die Abgleich-Aufgabe als SYSTEM, denn die
 Zugangsdaten sind absichtlich nur für SYSTEM und Administratoren lesbar und
-das Ändern der Aufgaben-Startzeiten braucht ohnehin erhöhte Rechte.
+das Ändern der Aufgaben-Auslöser braucht ohnehin erhöhte Rechte.
 
 ### Wann eine Änderung greift
 
 Der Agent ist als *Zustandsabgleich* gebaut, nicht als reine Zeitsteuerung. Er
-vergleicht bei jedem Abruf, ob gerade Tag- oder Nachtbetrieb gelten soll, und
-zieht nach. Eine mittags auf 11:00 vorgezogene Weckzeit wirkt deshalb sofort
-beim nächsten Abruf, ohne auf den nächsten Auslöser zu warten.
+vergleicht bei jedem Abruf, ob das Panel gerade an sein soll oder nicht, und
+zieht nach. Ein vorgezogener Fensterbeginn wirkt deshalb sofort beim nächsten
+Abruf, ohne auf den nächsten Auslöser zu warten.
 
 **Die eine Ausnahme:** Während das Panel im Standby liegt, kann es nichts
-abfragen. Der Aufwachzeitgeber steht dann noch auf der alten Weckzeit.
+abfragen. Die Aufwach-Auslöser stehen dann noch auf den alten Zeiten.
 
-- Weckzeit **nach hinten** verschoben: funktioniert auch nachts. Das Panel
-  wacht zur alten Zeit auf, merkt beim Abruf, dass das Fenster noch gilt, und
-  legt sich wieder hin.
-- Weckzeit **nach vorne** gezogen: wirkt erst in der folgenden Nacht. Wer das
-  sofort braucht, nutzt „Jetzt aufwecken" am Tag davor oder Wake-on-LAN.
+- Fensterbeginn **nach hinten** verschoben: funktioniert auch im Schlaf. Das
+  Panel wacht zur alten Zeit auf, merkt beim Abruf, dass es noch zu früh ist,
+  und legt sich wieder hin.
+- Fensterbeginn **nach vorne** gezogen: wirkt erst beim nächsten Aufwachen.
+  Wer das sofort braucht, nutzt „Jetzt aufwecken" vorher oder Wake-on-LAN.
 
 Fällt der Server aus, behält das Panel den letzten gültigen Zeitplan. Es gibt
 bewusst keinen Rückfall auf „immer an" – das wäre genau der Zustand, der
@@ -250,9 +263,9 @@ vorzeitig ab.
 **Die Einschränkung, die man kennen muss:** Liegt das Panel bereits im
 Energiesparmodus, erreicht es kein Befehl – es ist schlicht aus. Das
 Wartungsfenster greift dann erst, wenn das Gerät durch seinen
-Aufwachzeitgeber von selbst hochkommt. Wer nachts dran will, setzt das Fenster
-also **vor** der Schlafenszeit. Im Modus `DisplayOnly` entfällt das Problem,
-weil das Gerät durchläuft.
+Aufwachzeitgeber von selbst hochkommt. Wer außerhalb der Fenster dran will,
+setzt das Wartungsfenster also **vor** dem Fensterende. Im Modus `DisplayOnly`
+entfällt das Problem, weil das Gerät durchläuft.
 
 ---
 
@@ -262,18 +275,19 @@ weil das Gerät durchläuft.
 2. PowerShell **als Administrator** öffnen und einrichten:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -SleepTime 22:00 -WakeTime 06:00
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1
 ```
 
 Läuft das Panel unter einem eigenen Autologon-Konto, dieses mit angeben:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -SleepTime 22:00 -WakeTime 06:00 -UserId "PANEL-PC\kiosk"
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -UserId "PANEL-PC\kiosk"
 ```
 
 `Install.ps1` erledigt dabei:
 
-- Konfiguration nach `C:\ProgramData\WallDisplayPower\config.json` schreiben
+- Konfiguration samt Wochenplan nach
+  `C:\ProgramData\WallDisplayPower\config.json` schreiben
 - Bildschirm- und Standby-Zeitüberschreitungen auf „nie" setzen (die Steuerung
   übernimmt das selbst)
 - Aufwachzeitgeber erlauben, Hybrid-Standby abschalten
@@ -300,25 +314,28 @@ Während des Tests nichts berühren. Danach steht im Klartext, ob der Modus
 
 | Schlüssel | Standard | Bedeutung |
 | --- | --- | --- |
-| `SleepTime` | `22:00` | Beginn des Nachtbetriebs |
-| `WakeTime` | `06:00` | Beginn des Tagbetriebs |
+| `Schedule` | siehe oben | Wochenplan: je Tag `{ "On": "HH:mm", "Off": "HH:mm" }` oder `null` |
 | `Mode` | `Combined` | `Combined`, `DisplayOnly` oder `SuspendOnly` |
 | `DisplayOffDelaySeconds` | `60` | Wartezeit zwischen Bildschirm aus und Standby |
-| `WakePreRollMinutes` | `1` | Vorlauf des Aufwachzeitgebers vor der Weckzeit |
+| `WakePreRollMinutes` | `1` | Vorlauf des Aufwachzeitgebers vor dem Fensterbeginn |
 | `WakeToleranceMinutes` | `10` | erlaubte Verspätung beim Aufwachen |
 | `MaxWakeFailures` | `2` | Fehlversuche bis zum Rückfall auf `DisplayOnly` |
 | `MinimumSuspendSeconds` | `30` | kürzerer „Standby" gilt als gescheitert |
-| `MaxSuspendRetries` | `20` | Grenze für erneute Standby-Versuche pro Nacht |
+| `MaxSuspendRetries` | `20` | Grenze für erneute Standby-Versuche je Ruhephase |
 | `KeepDisplayOffIntervalSeconds` | `20` | Takt des Bildschirm-Wächters |
 | `Enabled` | `true` | Zeitplan aktiv; `false` lässt das Panel durchlaufen |
 
-Mit angebundenem Server werden `SleepTime`, `WakeTime`, `Mode` und `Enabled` bei
-jedem Abruf überschrieben – dort ist der Server die Quelle. Von Hand ändern
-lohnt sich dann nur bei den übrigen Werten.
+Im Wochenplan gilt: Ist `Off` kleiner als `On`, reicht das Fenster über
+Mitternacht in den Folgetag. Sind beide gleich oder steht statt des Eintrags
+`null`, bleibt der Tag ganz aus. Mindestens ein Fenster muss übrig bleiben.
 
-Ohne Server: Nach Änderungen an den **Uhrzeiten** muss `Install.ps1` erneut
-laufen, damit die Aufgaben-Zeitpunkte mitgezogen werden. Änderungen an `Mode`
-und den übrigen Werten greifen ab der nächsten Nacht ohne Neuinstallation.
+Mit angebundenem Server werden `Schedule`, `Mode` und `Enabled` bei jedem
+Abruf überschrieben – dort ist der Server die Quelle. Von Hand ändern lohnt
+sich dann nur bei den übrigen Werten.
+
+Ohne Server: Nach Änderungen am **Wochenplan** muss `Install.ps1` erneut
+laufen, damit die Auslöser der Aufgaben mitgezogen werden. Änderungen an `Mode`
+und den übrigen Werten greifen ohne Neuinstallation.
 
 ---
 

@@ -112,8 +112,9 @@ test('Panel meldet sich beim ersten Abruf selbst an und bekommt Standardwerte', 
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.panelId, 'pfarrheim');
-  assert.equal(body.sleepTime, '22:00');
-  assert.equal(body.wakeTime, '06:00');
+  assert.deepEqual(body.schedule.Monday, { On: '18:00', Off: '22:00' });
+  assert.deepEqual(body.schedule.Friday, { On: '17:00', Off: '02:00' });
+  assert.deepEqual(body.schedule.Sunday, { On: '16:00', Off: '23:00' });
   assert.equal(body.mode, 'Combined');
   assert.equal(body.enabled, true);
   assert.equal(body.keepAwakeUntil, null);
@@ -167,43 +168,84 @@ test('Anmeldung mit falschem Kennwort wird abgewiesen', async () => {
   assert.equal(response.status, 401);
 });
 
-test('Zeiten aendern und das Panel holt die neuen Werte', async () => {
+const VOLLER_PLAN = {
+  Monday: { On: '18:00', Off: '22:00' },
+  Tuesday: { On: '18:00', Off: '22:00' },
+  Wednesday: { On: '18:00', Off: '22:00' },
+  Thursday: { On: '18:00', Off: '22:00' },
+  Friday: { On: '17:00', Off: '02:00' },
+  Saturday: { On: '17:00', Off: '02:00' },
+  Sunday: { On: '16:00', Off: '23:00' },
+};
+
+test('Wochenplan aendern und das Panel holt die neuen Werte', async () => {
   const headers = await adminLogin();
   const put = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ sleepTime: '21:30', wakeTime: '07:15', mode: 'DisplayOnly' }),
+    body: JSON.stringify({
+      schedule: { ...VOLLER_PLAN, Monday: { On: '19:30', Off: '23:15' }, Tuesday: null },
+      mode: 'DisplayOnly',
+    }),
   });
   assert.equal(put.status, 200);
 
   const fetched = await (
     await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
   ).json();
-  assert.equal(fetched.sleepTime, '21:30');
-  assert.equal(fetched.wakeTime, '07:15');
+  assert.deepEqual(fetched.schedule.Monday, { On: '19:30', Off: '23:15' });
+  assert.equal('Tuesday' in fetched.schedule, false, 'abgewaehlter Tag darf nicht im Plan stehen');
+  assert.deepEqual(fetched.schedule.Friday, { On: '17:00', Off: '02:00' });
   assert.equal(fetched.mode, 'DisplayOnly');
 });
 
-test('Ungueltige Uhrzeit wird abgewiesen', async () => {
+test('Fenster ueber Mitternacht bleibt erhalten', async () => {
+  const headers = await adminLogin();
+  await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ schedule: VOLLER_PLAN }),
+  });
+  const fetched = await (
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
+  ).json();
+  assert.deepEqual(fetched.schedule.Saturday, { On: '17:00', Off: '02:00' });
+});
+
+test('Ungueltige Uhrzeit im Wochenplan wird abgewiesen', async () => {
   const headers = await adminLogin();
   for (const value of ['25:00', '7:5', '22:60', 'abc', '']) {
     const response = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
       method: 'PUT',
       headers,
-      body: JSON.stringify({ sleepTime: value }),
+      body: JSON.stringify({ schedule: { ...VOLLER_PLAN, Monday: { On: value, Off: '22:00' } } }),
     });
     assert.equal(response.status, 400, `"${value}" haette abgewiesen werden muessen`);
   }
 });
 
-test('Identische Schlafens- und Weckzeit wird abgewiesen', async () => {
+test('Wochenplan ganz ohne Fenster wird abgewiesen', async () => {
   const headers = await adminLogin();
+  const leer = Object.fromEntries(Object.keys(VOLLER_PLAN).map((d) => [d, null]));
   const response = await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ sleepTime: '07:15' }),
+    body: JSON.stringify({ schedule: leer }),
   });
   assert.equal(response.status, 400);
+});
+
+test('Tag mit gleicher An- und Aus-Zeit gilt als aus', async () => {
+  const headers = await adminLogin();
+  await fetch(`${baseUrl}/api/v1/admin/panels/pfarrheim`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ schedule: { ...VOLLER_PLAN, Wednesday: { On: '18:00', Off: '18:00' } } }),
+  });
+  const fetched = await (
+    await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
+  ).json();
+  assert.equal('Wednesday' in fetched.schedule, false);
 });
 
 test('Unbekannter Modus wird abgewiesen', async () => {
@@ -431,7 +473,6 @@ test('Daten bleiben nach einem Neustart erhalten', async () => {
   const after = await (
     await fetch(`${baseUrl}/api/v1/panels/pfarrheim/schedule`, { headers: panelHeaders })
   ).json();
-  assert.equal(after.sleepTime, before.sleepTime);
-  assert.equal(after.wakeTime, before.wakeTime);
+  assert.deepEqual(after.schedule, before.schedule);
   assert.equal(after.enabled, before.enabled);
 });

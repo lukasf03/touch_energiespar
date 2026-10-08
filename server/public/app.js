@@ -1,4 +1,4 @@
-﻿// Weboberflaeche der Wandpanel-Steuerung. Bewusst ohne Framework: die Seite
+// Weboberflaeche der Wandpanel-Steuerung. Bewusst ohne Framework: die Seite
 // besteht aus einer Liste und einem Formular je Panel.
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -87,6 +87,62 @@ function toLocalInputValue(iso) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+const WEEKDAYS = [
+  ['Monday', 'Montag'],
+  ['Tuesday', 'Dienstag'],
+  ['Wednesday', 'Mittwoch'],
+  ['Thursday', 'Donnerstag'],
+  ['Friday', 'Freitag'],
+  ['Saturday', 'Samstag'],
+  ['Sunday', 'Sonntag'],
+];
+
+// Baut die sieben Tageszeilen und gibt eine Funktion zurueck, die den
+// aktuellen Stand als Wochenplan-Objekt liefert.
+function renderWeek(container, schedule) {
+  const template = $('#weekday-template');
+  const zeilen = [];
+
+  container.replaceChildren();
+  for (const [key, label] of WEEKDAYS) {
+    const row = template.content.firstElementChild.cloneNode(true);
+    const aktiv = $('.day-active', row);
+    const on = $('.day-on', row);
+    const off = $('.day-off', row);
+    const note = $('.day-note', row);
+
+    $('.day-name', row).textContent = label;
+
+    const fenster = schedule[key];
+    aktiv.checked = Boolean(fenster);
+    on.value = fenster?.On ?? '18:00';
+    off.value = fenster?.Off ?? '22:00';
+
+    const aktualisieren = () => {
+      on.disabled = !aktiv.checked;
+      off.disabled = !aktiv.checked;
+      // Hinweis, dass das Fenster in den Folgetag reicht - das ist beim
+      // Eintragen von "17:00 bis 02:00" nicht selbsterklaerend.
+      const ueberNacht = aktiv.checked && on.value && off.value && off.value < on.value;
+      note.textContent = ueberNacht ? '? bis zum Folgetag' : '';
+      row.classList.toggle('inactive', !aktiv.checked);
+    };
+    for (const el of [aktiv, on, off]) el.addEventListener('change', aktualisieren);
+    aktualisieren();
+
+    container.append(row);
+    zeilen.push({ key, aktiv, on, off });
+  }
+
+  return () => {
+    const ergebnis = {};
+    for (const { key, aktiv, on, off } of zeilen) {
+      ergebnis[key] = aktiv.checked ? { On: on.value, Off: off.value } : null;
+    }
+    return ergebnis;
+  };
+}
+
 function renderPanel(panel) {
   const node = $('#panel-template').content.firstElementChild.cloneNode(true);
   node.dataset.panelId = panel.id;
@@ -101,13 +157,13 @@ function renderPanel(panel) {
   badge.className = `badge state ${online ? (sleeping ? 'night' : 'day') : 'stale'}`;
 
   $('.seen', node).textContent = formatSeen(panel.heartbeatAt);
-  $('.display', node).textContent = beat.displayState ?? 'â€“';
-  $('.effective', node).textContent = beat.effectiveMode ?? 'â€“';
-  $('.failures', node).textContent = beat.consecutiveWakeFailures ?? 'â€“';
+  $('.display', node).textContent = beat.displayState ?? '–';
+  $('.effective', node).textContent = beat.effectiveMode ?? '–';
+  $('.failures', node).textContent = beat.consecutiveWakeFailures ?? '–';
 
   if (beat.fallbackReason) {
     const warn = $('.fallback', node);
-    warn.textContent = `RÃ¼ckstufung aktiv: ${beat.fallbackReason}`;
+    warn.textContent = `Rückstufung aktiv: ${beat.fallbackReason}`;
     warn.hidden = false;
   }
 
@@ -122,7 +178,7 @@ function renderPanel(panel) {
         await navigator.clipboard.writeText(remoteId);
         showMessage('Kennung kopiert.', 'ok');
       } catch {
-        showMessage('Kopieren nicht mÃ¶glich, bitte von Hand Ã¼bernehmen.', 'error');
+        showMessage('Kopieren nicht möglich, bitte von Hand übernehmen.', 'error');
       }
     });
   }
@@ -152,7 +208,7 @@ function renderPanel(panel) {
     const minutes = Number($('.maintenance-minutes', node).value);
     sendMaintenance(
       { minutes },
-      `Panel bleibt ${minutes} Minuten wach. Es Ã¼bernimmt das beim nÃ¤chsten Abruf, also binnen etwa 5 Minuten.`,
+      `Panel bleibt ${minutes} Minuten wach. Es übernimmt das beim nächsten Abruf, also binnen etwa 5 Minuten.`,
     );
   });
 
@@ -172,11 +228,11 @@ function renderPanel(panel) {
 
   const form = $('.schedule', node);
   form.name.value = panel.name ?? '';
-  form.sleepTime.value = panel.sleepTime;
-  form.wakeTime.value = panel.wakeTime;
   form.mode.value = panel.mode;
   form.enabled.checked = panel.enabled;
   form.keepAwakeUntil.value = toLocalInputValue(panel.keepAwakeUntil);
+
+  const readWeek = renderWeek($('.week-rows', node), panel.schedule ?? {});
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -186,14 +242,13 @@ function renderPanel(panel) {
         method: 'PUT',
         body: JSON.stringify({
           name: form.name.value,
-          sleepTime: form.sleepTime.value,
-          wakeTime: form.wakeTime.value,
+          schedule: readWeek(),
           mode: form.mode.value,
           enabled: form.enabled.checked,
           keepAwakeUntil: keepAwake ? new Date(keepAwake).toISOString() : null,
         }),
       });
-      showMessage('Gespeichert. Das Panel Ã¼bernimmt es beim nÃ¤chsten Abruf.', 'ok');
+      showMessage('Gespeichert. Das Panel übernimmt es beim nächsten Abruf.', 'ok');
       await loadPanels();
     } catch (error) {
       showMessage(error.message, 'error');
@@ -207,7 +262,7 @@ function renderPanel(panel) {
           method: 'POST',
           body: JSON.stringify({ name: button.dataset.command }),
         });
-        showMessage('Befehl vorgemerkt, das Panel fÃ¼hrt ihn beim nÃ¤chsten Abruf aus.', 'ok');
+        showMessage('Befehl vorgemerkt, das Panel führt ihn beim nächsten Abruf aus.', 'ok');
         await loadPanels();
       } catch (error) {
         showMessage(error.message, 'error');

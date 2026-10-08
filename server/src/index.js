@@ -1,4 +1,4 @@
-// Steuerungsserver fuer die Energiesteuerung von Wand-Touchpanels.
+﻿// Steuerungsserver fuer die Energiesteuerung von Wand-Touchpanels.
 //
 // Zwei getrennte Zugaenge:
 //   /api/v1/panels/...  Panels, angemeldet mit PANEL_TOKEN (Bearer)
@@ -127,11 +127,10 @@ app.get('/api/v1/panels/:panelId/schedule', requirePanelToken, (req, res) => {
   const panel = ensurePanel(id);
 
   res.json({
-    version: 1,
+    version: 2,
     panelId: panel.id,
     enabled: panel.enabled,
-    sleepTime: panel.sleepTime,
-    wakeTime: panel.wakeTime,
+    schedule: panel.schedule,
     mode: panel.mode,
     keepAwakeUntil: panel.keepAwakeUntil,
     command: panel.command,
@@ -185,18 +184,9 @@ app.get('/api/v1/admin/panels/:panelId', requireAdmin, (req, res) => {
 
 app.put('/api/v1/admin/panels/:panelId', requireAdmin, (req, res) => {
   const id = assertPanelId(req.params.panelId);
-  const existing = getPanel(id);
-  if (!existing) return res.status(404).json({ error: 'Panel nicht gefunden.' });
+  if (!getPanel(id)) return res.status(404).json({ error: 'Panel nicht gefunden.' });
 
-  const changes = parseScheduleInput(req.body);
-  // Gegenpruefung mit den gespeicherten Werten, falls nur ein Feld kommt.
-  const sleep = changes.sleepTime ?? existing.sleepTime;
-  const wake = changes.wakeTime ?? existing.wakeTime;
-  if (sleep === wake) {
-    throw new ValidationError('Schlafenszeit und Weckzeit duerfen nicht identisch sein.');
-  }
-
-  res.json(updatePanel(id, changes));
+  res.json(updatePanel(id, parseScheduleInput(req.body)));
 });
 
 app.post('/api/v1/admin/panels/:panelId/command', requireAdmin, (req, res) => {

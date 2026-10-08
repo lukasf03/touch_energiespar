@@ -1,16 +1,17 @@
-// Datenhaltung ueber das in Node eingebaute SQLite (node:sqlite, ab Node 22.5).
+﻿// Datenhaltung ueber das in Node eingebaute SQLite (node:sqlite, ab Node 22.5).
 // Kein externes Modul, keine Migrationen ausser dem Schema unten.
 
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { WEEKDAYS, DEFAULT_SCHEDULE } from './validate.js';
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS panels (
   id                TEXT PRIMARY KEY,
   name              TEXT NOT NULL DEFAULT '',
-  sleep_time        TEXT NOT NULL DEFAULT '22:00',
-  wake_time         TEXT NOT NULL DEFAULT '06:00',
+  schedule          TEXT NOT NULL,
   mode              TEXT NOT NULL DEFAULT 'Combined',
   enabled           INTEGER NOT NULL DEFAULT 1,
   keep_awake_until  TEXT,
@@ -35,7 +36,33 @@ export function openDatabase(file) {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  migrateToWeeklySchedule();
   return db;
+}
+
+// Aeltere Datenbanken hielten ein einzelnes Schlaf-Fenster (sleep_time bis
+// wake_time). Daraus wird ein Wochenplan: das Panel war genau umgekehrt an,
+// naemlich von wake_time bis sleep_time, und das an jedem Tag gleich.
+function migrateToWeeklySchedule() {
+  const columns = db.prepare('PRAGMA table_info(panels)').all().map((c) => c.name);
+  if (columns.includes('schedule') && !columns.includes('sleep_time')) return;
+
+  if (!columns.includes('schedule')) {
+    db.exec(`ALTER TABLE panels ADD COLUMN schedule TEXT NOT NULL DEFAULT ''`);
+  }
+
+  const rows = db.prepare(`SELECT id, sleep_time, wake_time FROM panels WHERE schedule = '' OR schedule IS NULL`).all();
+  const update = db.prepare('UPDATE panels SET schedule = ? WHERE id = ?');
+  for (const row of rows) {
+    const schedule = {};
+    for (const day of WEEKDAYS) {
+      schedule[day] = { On: row.wake_time ?? '06:00', Off: row.sleep_time ?? '22:00' };
+    }
+    update.run(JSON.stringify(schedule), row.id);
+  }
+  if (rows.length > 0) {
+    console.log(`Wochenplan fuer ${rows.length} Panel(s) aus den alten Zeiten uebernommen.`);
+  }
 }
 
 const nowIso = () => new Date().toISOString();
@@ -72,16 +99,15 @@ export function ensurePanel(id) {
 
   const ts = nowIso();
   db.prepare(
-    `INSERT INTO panels (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
-  ).run(id, id, ts, ts);
+    `INSERT INTO panels (id, name, schedule, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, id, JSON.stringify(DEFAULT_SCHEDULE), ts, ts);
   return getPanel(id);
 }
 
 export function updatePanel(id, changes) {
   const columns = {
     name: 'name',
-    sleepTime: 'sleep_time',
-    wakeTime: 'wake_time',
+    schedule: 'schedule',
     mode: 'mode',
     enabled: 'enabled',
     keepAwakeUntil: 'keep_awake_until',
@@ -93,7 +119,9 @@ export function updatePanel(id, changes) {
     if (!(key in changes)) continue;
     sets.push(`${column} = ?`);
     const value = changes[key];
-    values.push(key === 'enabled' ? (value ? 1 : 0) : value === null ? null : String(value));
+    if (key === 'enabled') values.push(value ? 1 : 0);
+    else if (key === 'schedule') values.push(JSON.stringify(value));
+    else values.push(value === null ? null : String(value));
   }
   if (sets.length === 0) return getPanel(id);
 
@@ -133,11 +161,18 @@ function toPanel(row) {
       heartbeat = null;
     }
   }
+  let schedule;
+  try {
+    schedule = JSON.parse(row.schedule);
+  } catch {
+    // Unlesbarer Wochenplan darf das Panel nicht lahmlegen.
+    schedule = DEFAULT_SCHEDULE;
+  }
+
   return {
     id: row.id,
     name: row.name,
-    sleepTime: row.sleep_time,
-    wakeTime: row.wake_time,
+    schedule,
     mode: row.mode,
     enabled: row.enabled === 1,
     keepAwakeUntil: row.keep_awake_until,

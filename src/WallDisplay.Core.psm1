@@ -1,4 +1,4 @@
-<#
+﻿<#
     WallDisplay.Core
     Kernfunktionen fuer die Energiesteuerung eines Wand-Touchpanels:
     Bildschirm ein/aus, Standby, Konfiguration, Zustand, Protokoll.
@@ -19,9 +19,20 @@ $script:GuidHybridSleep = '94ac6d29-73ce-41a6-809f-6363ba21b47e'
 
 $script:AgentVersion = '1.1.0'
 
+$script:WeekDays = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+
+$script:ScheduleDefault = @{
+    Monday    = @{ On = '18:00'; Off = '22:00' }
+    Tuesday   = @{ On = '18:00'; Off = '22:00' }
+    Wednesday = @{ On = '18:00'; Off = '22:00' }
+    Thursday  = @{ On = '18:00'; Off = '22:00' }
+    Friday    = @{ On = '17:00'; Off = '02:00' }
+    Saturday  = @{ On = '17:00'; Off = '02:00' }
+    Sunday    = @{ On = '16:00'; Off = '23:00' }
+}
+
 $script:ConfigDefaults = @{
-    SleepTime                     = '22:00'
-    WakeTime                      = '06:00'
+    Schedule                      = $script:ScheduleDefault
     Mode                          = 'Combined'
     Enabled                       = $true
     DisplayOffDelaySeconds        = 60
@@ -131,8 +142,14 @@ function Get-WallConfig {
     }
 
     $cfg['SourceFile'] = $source
-    $cfg['SleepTimeOfDay'] = ConvertTo-TimeOfDay $cfg['SleepTime']
-    $cfg['WakeTimeOfDay']  = ConvertTo-TimeOfDay $cfg['WakeTime']
+
+    try {
+        $cfg['Windows'] = ConvertTo-WallSchedule -Raw $cfg['Schedule']
+    } catch {
+        Write-WallLog -Level ERROR ("Zeitplan unbrauchbar, es gilt der Standard: {0}" -f $_.Exception.Message)
+        $cfg['Schedule'] = $script:ScheduleDefault
+        $cfg['Windows'] = ConvertTo-WallSchedule -Raw $script:ScheduleDefault
+    }
 
     if ($cfg['Mode'] -notin @('Combined', 'DisplayOnly', 'SuspendOnly')) {
         Write-WallLog -Level WARN ("Unbekannter Modus '{0}', es gilt 'Combined'." -f $cfg['Mode'])
@@ -140,6 +157,157 @@ function Get-WallConfig {
     }
 
     return [pscustomobject]$cfg
+}
+
+function ConvertTo-WallSchedule {
+    <#
+        Prueft und normalisiert den Wochenplan.
+
+        Ergebnis ist eine Tabelle Wochentag -> @{ On; Off; CrossesMidnight }
+        mit TimeSpan-Werten. Tage ohne Fenster fehlen darin.
+
+        'Off' kleiner oder gleich 'On' bedeutet: das Fenster reicht ueber
+        Mitternacht in den Folgetag (Freitag 17:00 bis Samstag 02:00).
+        Sind beide gleich, gilt der Tag als aus - ein Fenster der Laenge null
+        waere sonst nicht von "den ganzen Tag an" zu unterscheiden.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Raw)
+
+    if ($null -eq $Raw) { throw 'Zeitplan fehlt.' }
+
+    $windows = [ordered]@{}
+    foreach ($day in $script:WeekDays) {
+        $entry = Get-RawField -Object $Raw -Name $day
+        if ($null -eq $entry) { continue }
+
+        $onText = Get-RawField -Object $entry -Name 'On'
+        $offText = Get-RawField -Object $entry -Name 'Off'
+        if ($null -eq $onText -or $null -eq $offText) {
+            throw "Zeitplan fuer $day hat kein On/Off."
+        }
+
+        $on = ConvertTo-TimeOfDay ([string]$onText)
+        $off = ConvertTo-TimeOfDay ([string]$offText)
+        if ($on -eq $off) { continue }
+
+        $windows[$day] = @{
+            On              = $on
+            Off             = $off
+            CrossesMidnight = ($off -lt $on)
+        }
+    }
+
+    if ($windows.Count -eq 0) { throw 'Zeitplan enthaelt kein einziges Fenster.' }
+    return $windows
+}
+
+function Test-ActiveWindow {
+    <#
+        Liegt der Zeitpunkt in einem Aktiv-Fenster, soll das Panel also an sein?
+        Beruecksichtigt auch das Fenster des Vortages, wenn es ueber
+        Mitternacht reicht.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Windows,
+        [datetime]$Now = (Get-Date)
+    )
+
+    $time = $Now.TimeOfDay
+
+    $today = $Windows[[string]$Now.DayOfWeek]
+    if ($today) {
+        if ($today.CrossesMidnight) {
+            if ($time -ge $today.On) { return $true }
+        } elseif ($time -ge $today.On -and $time -lt $today.Off) {
+            return $true
+        }
+    }
+
+    $yesterday = $Windows[[string]$Now.AddDays(-1).DayOfWeek]
+    if ($yesterday -and $yesterday.CrossesMidnight -and $time -lt $yesterday.Off) {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-NextWindowStart {
+    <#
+        Naechster Zeitpunkt, zu dem das Panel an sein soll. $null, wenn der
+        Zeitplan gar kein Fenster enthaelt.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Windows,
+        [datetime]$From = (Get-Date)
+    )
+
+    for ($offset = 0; $offset -le 7; $offset++) {
+        $day = $From.Date.AddDays($offset)
+        $window = $Windows[[string]$day.DayOfWeek]
+        if (-not $window) { continue }
+
+        $candidate = $day.Add($window.On)
+        if ($candidate -gt $From) { return $candidate }
+    }
+    return $null
+}
+
+function Get-CurrentWindowEnd {
+    <#
+        Ende des gerade laufenden Aktiv-Fensters. $null, wenn gerade keines
+        laeuft.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Windows,
+        [datetime]$Now = (Get-Date)
+    )
+
+    $time = $Now.TimeOfDay
+
+    $today = $Windows[[string]$Now.DayOfWeek]
+    if ($today) {
+        if ($today.CrossesMidnight -and $time -ge $today.On) {
+            return $Now.Date.AddDays(1).Add($today.Off)
+        }
+        if (-not $today.CrossesMidnight -and $time -ge $today.On -and $time -lt $today.Off) {
+            return $Now.Date.Add($today.Off)
+        }
+    }
+
+    $yesterday = $Windows[[string]$Now.AddDays(-1).DayOfWeek]
+    if ($yesterday -and $yesterday.CrossesMidnight -and $time -lt $yesterday.Off) {
+        return $Now.Date.Add($yesterday.Off)
+    }
+
+    return $null
+}
+
+function Get-ScheduleFingerprint {
+    <#
+        Kurzer Fingerabdruck des Wochenplans. Damit laesst sich feststellen, ob
+        die Startzeiten der Aufgaben noch zum Zeitplan passen, ohne jeden
+        einzelnen Ausloeser vergleichen zu muessen.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][psobject]$Config)
+
+    $parts = foreach ($day in $script:WeekDays) {
+        $window = $Config.Windows[$day]
+        if ($window) { '{0}={1:hh\:mm}-{2:hh\:mm}' -f $day, $window.On, $window.Off } else { "$day=-" }
+    }
+    $text = ($parts -join ';') + ';preroll=' + [int]$Config.WakePreRollMinutes
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))
+        return ([BitConverter]::ToString($hash) -replace '-').Substring(0, 16)
+    } finally {
+        $sha.Dispose()
+    }
 }
 
 function Save-WallConfig {
@@ -210,16 +378,17 @@ function Get-NextOccurrence {
 
 function Test-InsideSleepWindow {
     <#
-        Entscheidet, ob gerade Nachtbetrieb gelten soll.
+        Entscheidet, ob das Panel gerade schlafen soll.
+
+        Grundregel: Der Wochenplan beschreibt die Zeiten, zu denen das Panel AN
+        ist. Ausserhalb dieser Fenster schlaeft es.
 
         Reihenfolge der Auswertung (die erste zutreffende Regel gewinnt):
-          1. Befehl 'sleep-now' laeuft noch  -> Nacht
-          2. Zeitplan ist abgeschaltet       -> Tag
-          3. Befehl 'wake-now' laeuft noch   -> Tag
-          4. Server-Uebersteuerung aktiv     -> Tag
-          5. Uhrzeit liegt im Zeitfenster    -> Nacht
-
-        Das Zeitfenster darf Mitternacht ueberspannen (22:00 bis 06:00).
+          1. Befehl 'sleep-now' laeuft noch  -> schlafen
+          2. Zeitplan ist abgeschaltet       -> wach (Panel laeuft durch)
+          3. Befehl 'wake-now' laeuft noch   -> wach
+          4. Server-Uebersteuerung aktiv     -> wach
+          5. Zeitpunkt liegt in einem Fenster -> wach, sonst schlafen
     #>
     [CmdletBinding()]
     param(
@@ -238,13 +407,7 @@ function Test-InsideSleepWindow {
         if ($until -and $Now -lt $until) { return $false }
     }
 
-    $sleep = $Config.SleepTimeOfDay
-    $wake = $Config.WakeTimeOfDay
-    if ($sleep -eq $wake) { return $false }
-
-    $time = $Now.TimeOfDay
-    if ($sleep -lt $wake) { return ($time -ge $sleep -and $time -lt $wake) }
-    return ($time -ge $sleep -or $time -lt $wake)
+    return (-not (Test-ActiveWindow -Windows $Config.Windows -Now $Now))
 }
 
 function Test-WallNightMode {
@@ -282,6 +445,10 @@ function Get-WallState {
         CommandAwakeUntilUtc    = $null   # durch Befehl 'wake-now'
         CommandSleepUntilUtc    = $null   # durch Befehl 'sleep-now'
         LastCommandId           = $null
+
+        # Fingerabdruck des Wochenplans, zu dem die Aufgaben-Ausloeser zuletzt
+        # gesetzt wurden. Passt er nicht mehr, wird kein Standby gewagt.
+        TaskScheduleFingerprint = $null
 
         SyncLastSuccessUtc      = $null
         SyncConsecutiveFailures = 0
@@ -805,32 +972,28 @@ function Stop-WallSleepTask {
 
 function Test-WakeTaskMatchesSchedule {
     <#
-        Prueft, ob der Aufwachzeitgeber zur konfigurierten Weckzeit passt.
+        Prueft, ob die Aufwach-Ausloeser noch zum Wochenplan passen.
 
         Noetig, weil der Zeitplan kurz vor dem Standby noch vom Server kommen
-        kann. Liesse sich die Startzeit der Aufgabe dabei nicht nachziehen
-        (etwa mangels Administratorrechten), wuerde das Panel schlafen gehen
-        und zur alten Zeit aufwachen. Dann ist Durchlaufen die bessere Wahl.
+        kann. Liessen sich die Ausloeser dabei nicht nachziehen (etwa mangels
+        Administratorrechten), wuerde das Panel schlafen gehen und zur alten
+        Zeit aufwachen. Dann ist Durchlaufen die bessere Wahl.
+
+        Verglichen wird ein Fingerabdruck des Wochenplans, der beim Setzen der
+        Ausloeser hinterlegt wird - verlaesslicher, als jeden einzelnen
+        Ausloeser nachzurechnen.
     #>
     [CmdletBinding()]
-    param([psobject]$Config = (Get-WallConfig))
+    param(
+        [psobject]$Config = (Get-WallConfig),
+        [psobject]$State = (Get-WallState)
+    )
 
     $task = Get-WallTask -Name $script:TaskPrewake
     if (-not $task) { return $false }
+    if (-not @($task.Triggers)) { return $false }
 
-    $trigger = @($task.Triggers) | Select-Object -First 1
-    if (-not $trigger -or -not $trigger.StartBoundary) { return $false }
-
-    $expected = $Config.WakeTimeOfDay - [timespan]::FromMinutes([double]$Config.WakePreRollMinutes)
-    if ($expected -lt [timespan]::Zero) { $expected = $expected.Add([timespan]::FromDays(1)) }
-
-    try {
-        $actual = [datetime]::Parse([string]$trigger.StartBoundary, [cultureinfo]::InvariantCulture,
-            [System.Globalization.DateTimeStyles]::RoundtripKind)
-    } catch {
-        return $false
-    }
-    return ($actual.TimeOfDay -eq $expected)
+    return ([string]$State.TaskScheduleFingerprint -eq (Get-ScheduleFingerprint -Config $Config))
 }
 
 function Test-SuspendPrecondition {
@@ -839,12 +1002,15 @@ function Test-SuspendPrecondition {
         Fehlt eine Voraussetzung, bleibt es beim ausgeschalteten Bildschirm.
     #>
     [CmdletBinding()]
-    param([psobject]$Config = (Get-WallConfig))
+    param(
+        [psobject]$Config = (Get-WallConfig),
+        [psobject]$State = (Get-WallState)
+    )
 
     $reasons = New-Object System.Collections.Generic.List[string]
 
-    if (-not (Test-WakeTaskMatchesSchedule -Config $Config)) {
-        $reasons.Add(("Der Aufwachzeitgeber passt nicht zur Weckzeit {0}." -f $Config.WakeTime))
+    if (-not (Test-WakeTaskMatchesSchedule -Config $Config -State $State)) {
+        $reasons.Add('Die Aufwach-Ausloeser passen nicht zum aktuellen Wochenplan.')
     }
 
     $prewake = Get-WallTask -Name $script:TaskPrewake
@@ -1082,16 +1248,22 @@ function ConvertTo-ValidatedSchedule {
     $knownCommands = @('none', 'sleep-now', 'wake-now')
     $knownModes = @('Combined', 'DisplayOnly', 'SuspendOnly')
 
-    $sleepValue = Get-RawField -Object $Raw -Name 'sleepTime'
-    $wakeValue = Get-RawField -Object $Raw -Name 'wakeTime'
-    if ($null -eq $sleepValue -or $null -eq $wakeValue) {
-        throw 'Antwort ohne sleepTime/wakeTime.'
-    }
+    $scheduleValue = Get-RawField -Object $Raw -Name 'schedule'
+    if ($null -eq $scheduleValue) { throw 'Antwort ohne Wochenplan.' }
 
-    $sleepTod = ConvertTo-TimeOfDay ([string]$sleepValue)
-    $wakeTod = ConvertTo-TimeOfDay ([string]$wakeValue)
-    if ($sleepTod -eq $wakeTod) {
-        throw 'Antwort mit identischer Schlafens- und Weckzeit.'
+    # Wirft bei jeder unbrauchbaren Uhrzeit; der ganze Abruf scheitert dann und
+    # der zuletzt gueltige Zeitplan bleibt in Kraft.
+    $windows = ConvertTo-WallSchedule -Raw $scheduleValue
+
+    # Fuer die Ablage in config.json wieder in reine Textwerte umwandeln.
+    $schedule = [ordered]@{}
+    foreach ($day in $script:WeekDays) {
+        if ($windows[$day]) {
+            $schedule[$day] = @{
+                On  = '{0:hh\:mm}' -f $windows[$day].On
+                Off = '{0:hh\:mm}' -f $windows[$day].Off
+            }
+        }
     }
 
     $mode = 'Combined'
@@ -1142,8 +1314,8 @@ function ConvertTo-ValidatedSchedule {
     }
 
     [pscustomobject]@{
-        SleepTime      = $sleepTod.ToString('hh\:mm')
-        WakeTime       = $wakeTod.ToString('hh\:mm')
+        Schedule       = $schedule
+        Windows        = $windows
         Mode           = $mode
         Enabled        = $enabled
         KeepAwakeUntil = $keepAwakeUntil
@@ -1234,51 +1406,119 @@ function Get-RemoteAccessId {
     return $null
 }
 
-function New-WallDailyTrigger {
+function New-WallWeeklyTrigger {
     <#
-        Taeglicher Ausloeser zur angegebenen Ortszeit.
+        Woechentlicher Ausloeser zur angegebenen Ortszeit an bestimmten Tagen.
 
         New-ScheduledTaskTrigger legt die Startzeit als UTC ab ('...Z'). Eine
         UTC-Startzeit verschiebt sich bei der Zeitumstellung um eine Stunde,
-        das Panel wuerde also nach dem Wechsel zu falscher Uhrzeit schlafen.
+        das Panel wuerde also nach dem Wechsel zu falscher Uhrzeit schalten.
         Darum wird die Startzeit auf eine lokale Angabe ohne Zeitzone gesetzt.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][datetime]$At)
+    param(
+        [Parameter(Mandatory)][string[]]$Days,
+        [Parameter(Mandatory)][timespan]$At
+    )
 
-    $trigger = New-ScheduledTaskTrigger -Daily -At $At
-    $trigger.StartBoundary = $At.ToString('yyyy-MM-ddTHH:mm:ss')
+    $start = [datetime]::Today.Add($At)
+    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At $start
+    $trigger.StartBoundary = $start.ToString('yyyy-MM-ddTHH:mm:ss')
     return $trigger
 }
 
-function Update-WallTaskTime {
+function Get-WallScheduleTriggers {
     <#
-        Setzt die Startzeit einer bestehenden Aufgabe neu. Rueckgabe $true,
-        wenn tatsaechlich etwas geaendert wurde. Braucht Administratorrechte.
+        Erzeugt die Ausloeser einer Aufgabe aus dem Wochenplan.
+
+        Kind:
+          Wake    Beginn jedes Fensters (Panel geht an)
+          Prewake wie Wake, aber um den Vorlauf frueher (weckt das Geraet)
+          Sleep   Ende jedes Fensters (Panel geht aus)
+
+        Wichtig beim Ende: Reicht ein Fenster ueber Mitternacht, liegt sein
+        Ende am FOLGETAG. Freitag 17:00 bis 02:00 bedeutet also einen
+        Ausloeser am Samstag um 02:00.
+
+        Ausloeser mit gleicher Uhrzeit werden zu einem Wochentrigger
+        zusammengefasst, das haelt die Aufgabe uebersichtlich.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject]$Config,
+        [Parameter(Mandatory)][ValidateSet('Wake', 'Prewake', 'Sleep')][string]$Kind
+    )
+
+    $byTime = @{}
+    foreach ($day in $script:WeekDays) {
+        $window = $Config.Windows[$day]
+        if (-not $window) { continue }
+
+        if ($Kind -eq 'Sleep') {
+            $time = $window.Off
+            $triggerDay = if ($window.CrossesMidnight) { Get-NextWeekDay -Day $day } else { $day }
+        } else {
+            $time = $window.On
+            $triggerDay = $day
+            if ($Kind -eq 'Prewake') {
+                $time = $time - [timespan]::FromMinutes([double]$Config.WakePreRollMinutes)
+                if ($time -lt [timespan]::Zero) {
+                    # Der Vorlauf rutscht vor Mitternacht: Ausloeser am Vortag.
+                    $time = $time.Add([timespan]::FromDays(1))
+                    $triggerDay = Get-PreviousWeekDay -Day $day
+                }
+            }
+        }
+
+        $key = '{0:hh\:mm}' -f $time
+        if (-not $byTime.ContainsKey($key)) { $byTime[$key] = @{ Time = $time; Days = @() } }
+        if ($byTime[$key].Days -notcontains $triggerDay) { $byTime[$key].Days += $triggerDay }
+    }
+
+    $triggers = @()
+    foreach ($key in ($byTime.Keys | Sort-Object)) {
+        $triggers += New-WallWeeklyTrigger -Days $byTime[$key].Days -At $byTime[$key].Time
+    }
+    return $triggers
+}
+
+function Get-NextWeekDay {
+    param([Parameter(Mandatory)][string]$Day)
+    $index = [array]::IndexOf($script:WeekDays, $Day)
+    return $script:WeekDays[($index + 1) % 7]
+}
+
+function Get-PreviousWeekDay {
+    param([Parameter(Mandatory)][string]$Day)
+    $index = [array]::IndexOf($script:WeekDays, $Day)
+    return $script:WeekDays[($index + 6) % 7]
+}
+
+function Update-WallTaskTriggers {
+    <#
+        Setzt die Ausloeser einer bestehenden Aufgabe neu. Braucht
+        Administratorrechte.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][datetime]$At
+        [Parameter(Mandatory)][psobject]$Config,
+        [Parameter(Mandatory)][ValidateSet('Wake', 'Prewake', 'Sleep')][string]$Kind
     )
 
     $task = Get-WallTask -Name $Name
     if (-not $task) {
-        Write-WallLog -Level WARN ("Aufgabe '{0}' fehlt, Startzeit nicht aenderbar." -f $Name)
+        Write-WallLog -Level WARN ("Aufgabe '{0}' fehlt, Ausloeser nicht aenderbar." -f $Name)
         return $false
     }
 
-    $desired = $At.ToString('yyyy-MM-ddTHH:mm:ss')
-    $current = @($task.Triggers) | Select-Object -First 1
-    if ($current -and [string]$current.StartBoundary -eq $desired) { return $false }
-
     try {
-        $task.Triggers = @(New-WallDailyTrigger -At $At)
+        $task.Triggers = @(Get-WallScheduleTriggers -Config $Config -Kind $Kind)
         Set-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
-        Write-WallLog ("Startzeit der Aufgabe '{0}' auf {1:HH:mm} gesetzt." -f $Name, $At)
+        Write-WallLog ("Ausloeser der Aufgabe '{0}' neu gesetzt ({1} Stueck)." -f $Name, @($task.Triggers).Count)
         return $true
     } catch {
-        Write-WallLog -Level ERROR ("Startzeit der Aufgabe '{0}' konnte nicht gesetzt werden: {1}" -f $Name, $_.Exception.Message)
+        Write-WallLog -Level ERROR ("Ausloeser der Aufgabe '{0}' konnten nicht gesetzt werden: {1}" -f $Name, $_.Exception.Message)
         return $false
     }
 }
@@ -1361,7 +1601,8 @@ Export-ModuleMember -Function @(
     'Get-WallPaths', 'Confirm-WallDataRoot',
     'Write-WallLog', 'Get-WallLogTail',
     'Get-WallConfig', 'Save-WallConfig', 'ConvertTo-TimeOfDay', 'ConvertFrom-WallUtc', 'Get-NextOccurrence',
-    'Test-InsideSleepWindow', 'Test-WallNightMode',
+    'Test-InsideSleepWindow', 'Test-WallNightMode', 'ConvertTo-WallSchedule', 'Test-ActiveWindow',
+    'Get-NextWindowStart', 'Get-CurrentWindowEnd', 'Get-ScheduleFingerprint',
     'Get-WallState', 'Save-WallState', 'Resolve-EffectiveMode', 'Set-FallbackMode',
     'Register-WakeFailure', 'Register-WakeSuccess',
     'New-WallSignal', 'Remove-WallSignal', 'Test-WallSignal', 'Wait-WallInterval',
@@ -1371,6 +1612,7 @@ Export-ModuleMember -Function @(
     'Test-WakeTaskMatchesSchedule', 'Grant-WallDataAccess', 'Get-SystemLanguageInfo',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',
     'ConvertTo-ValidatedSchedule', 'Send-WallHeartbeat', 'Get-WallAgentVersion', 'Get-RemoteAccessId',
-    'New-WallDailyTrigger', 'Update-WallTaskTime', 'Start-WallTask', 'Wait-WallTask',
+    'New-WallWeeklyTrigger', 'Get-WallScheduleTriggers', 'Update-WallTaskTriggers',
+    'Start-WallTask', 'Wait-WallTask',
     'Test-WallAdmin'
 )

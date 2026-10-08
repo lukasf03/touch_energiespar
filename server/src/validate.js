@@ -4,6 +4,28 @@
 export const MODES = ['Combined', 'DisplayOnly', 'SuspendOnly'];
 export const COMMANDS = ['none', 'sleep-now', 'wake-now'];
 
+export const WEEKDAYS = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+// Zeiten, zu denen das Panel AN ist. 'Off' kleiner als 'On' heisst: das
+// Fenster reicht ueber Mitternacht in den Folgetag.
+export const DEFAULT_SCHEDULE = {
+  Monday: { On: '18:00', Off: '22:00' },
+  Tuesday: { On: '18:00', Off: '22:00' },
+  Wednesday: { On: '18:00', Off: '22:00' },
+  Thursday: { On: '18:00', Off: '22:00' },
+  Friday: { On: '17:00', Off: '02:00' },
+  Saturday: { On: '17:00', Off: '02:00' },
+  Sunday: { On: '16:00', Off: '23:00' },
+};
+
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const PANEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
@@ -78,6 +100,39 @@ export function assertName(value) {
   return text;
 }
 
+// Wochenplan: je Wochentag ein Fenster { On, Off } oder null (ganzen Tag aus).
+export function assertSchedule(value) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ValidationError('Wochenplan muss ein Objekt mit den Wochentagen sein.');
+  }
+
+  const schedule = {};
+  let fenster = 0;
+
+  for (const day of WEEKDAYS) {
+    const entry = value[day];
+    if (entry === null || entry === undefined) continue;
+
+    if (typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ValidationError(`Eintrag fuer ${day} muss On und Off enthalten.`);
+    }
+
+    const on = assertTime(entry.On, `${day} (an ab)`);
+    const off = assertTime(entry.Off, `${day} (aus um)`);
+    // Gleiche Zeiten bedeuten "kein Fenster": ein Fenster der Laenge null
+    // waere sonst nicht von "den ganzen Tag an" zu unterscheiden.
+    if (on === off) continue;
+
+    schedule[day] = { On: on, Off: off };
+    fenster += 1;
+  }
+
+  if (fenster === 0) {
+    throw new ValidationError('Der Wochenplan braucht mindestens ein Fenster.');
+  }
+  return schedule;
+}
+
 // Zeitplan-Aenderungen aus der Weboberflaeche.
 export function parseScheduleInput(body) {
   if (typeof body !== 'object' || body === null) {
@@ -86,18 +141,11 @@ export function parseScheduleInput(body) {
 
   const changes = {};
   if ('name' in body) changes.name = assertName(body.name);
-  if ('sleepTime' in body) changes.sleepTime = assertTime(body.sleepTime, 'Schlafenszeit');
-  if ('wakeTime' in body) changes.wakeTime = assertTime(body.wakeTime, 'Weckzeit');
+  if ('schedule' in body) changes.schedule = assertSchedule(body.schedule);
   if ('mode' in body) changes.mode = assertMode(body.mode);
   if ('enabled' in body) changes.enabled = Boolean(body.enabled);
   if ('keepAwakeUntil' in body) {
     changes.keepAwakeUntil = assertOptionalTimestamp(body.keepAwakeUntil, 'Wach bleiben bis');
-  }
-
-  const sleep = changes.sleepTime;
-  const wake = changes.wakeTime;
-  if (sleep && wake && sleep === wake) {
-    throw new ValidationError('Schlafenszeit und Weckzeit duerfen nicht identisch sein.');
   }
 
   if (Object.keys(changes).length === 0) {
@@ -124,8 +172,7 @@ export function parseHeartbeat(body) {
     agentVersion: text(body.agentVersion, 32),
     computerName: text(body.computerName, 64),
     reportedAtUtc: text(body.reportedAtUtc, 40),
-    configuredSleepTime: text(body.configuredSleepTime, 8),
-    configuredWakeTime: text(body.configuredWakeTime, 8),
+    configuredSchedule: text(body.configuredSchedule, 200),
     configuredMode: text(body.configuredMode, 20),
     effectiveMode: text(body.effectiveMode, 20),
     enabled: Boolean(body.enabled),

@@ -9,19 +9,17 @@
       \WallDisplayPower\Sleep      zur Schlafenszeit, laeuft in der Sitzung des
                                    angemeldeten Benutzers (nur dort kann der
                                    Bildschirm abgeschaltet werden)
-      \WallDisplayPower\WakeTimer  eine Minute vor der Weckzeit, laeuft als
+      \WallDisplayPower\WakeTimer  eine Minute vor jedem Fensterbeginn, laeuft als
                                    SYSTEM und holt das Geraet per
                                    Aufwachzeitgeber aus dem Standby
       \WallDisplayPower\Wake       zur Weckzeit, schaltet den Bildschirm ein
 
-.PARAMETER SleepTime
-    Uhrzeit, ab der das Panel schlafen soll, Format HH:mm. Ohne Angabe bleibt
-    der Wert aus der Konfiguration erhalten.
-
-.PARAMETER WakeTime
-    Uhrzeit, zu der das Panel wieder laufen soll, Format HH:mm.
-
 .PARAMETER Mode
+    Betriebsart ausserhalb der Aktiv-Fenster.
+
+    Die Zeiten selbst stehen im Wochenplan in config.json (Abschnitt
+    "Schedule") beziehungsweise kommen vom Steuerungsserver.
+
     Combined    Bildschirm aus, danach Standby (Standard)
     DisplayOnly nur Bildschirm aus, kein Standby
     SuspendOnly sofort Standby ohne Vorlauf
@@ -52,18 +50,16 @@
     Erlaubt http statt https. Nur fuer Tests im eigenen Netz.
 
 .EXAMPLE
-    .\Install.ps1 -SleepTime 22:00 -WakeTime 06:00
+    .\Install.ps1
 
 .EXAMPLE
-    .\Install.ps1 -SleepTime 21:30 -WakeTime 07:00 -UserId 'PANEL-PC\kiosk'
+    .\Install.ps1 -UserId 'PANEL-PC\kiosk'
 
 .EXAMPLE
     .\Install.ps1 -ServerUrl https://panel.example.org -PanelId pfarrheim -ApiToken 'geheim'
 #>
 [CmdletBinding()]
 param(
-    [string]$SleepTime,
-    [string]$WakeTime,
     [ValidateSet('Combined', 'DisplayOnly', 'SuspendOnly')][string]$Mode,
     [string]$UserId,
     [switch]$KeepHibernate,
@@ -100,23 +96,29 @@ Confirm-WallDataRoot | Out-Null
 # ------------------------------------------------------------- 1. Konfiguration
 
 $overrides = @{}
-if ($PSBoundParameters.ContainsKey('SleepTime')) { ConvertTo-TimeOfDay $SleepTime | Out-Null; $overrides['SleepTime'] = $SleepTime }
-if ($PSBoundParameters.ContainsKey('WakeTime'))  { ConvertTo-TimeOfDay $WakeTime  | Out-Null; $overrides['WakeTime']  = $WakeTime }
+
 if ($PSBoundParameters.ContainsKey('Mode'))      { $overrides['Mode'] = $Mode }
 
 $configFile = Save-WallConfig -Values $overrides
 $config = Get-WallConfig
 
-if ($config.SleepTime -eq $config.WakeTime) {
-    throw 'Schlafenszeit und Weckzeit duerfen nicht identisch sein.'
-}
+
 
 Write-Host ''
 Write-Host '=== Einrichtung Wand-Display Energiesteuerung ===' -ForegroundColor Cyan
 Write-Host ('Konfiguration : {0}' -f $configFile)
-Write-Host ('Schlafen ab   : {0}' -f $config.SleepTime)
-Write-Host ('Aufwachen um  : {0}' -f $config.WakeTime)
 Write-Host ('Modus         : {0}' -f $config.Mode)
+Write-Host 'Wochenplan    : Zeiten, zu denen das Panel AN ist'
+$kurz = @{ Monday = 'Mo'; Tuesday = 'Di'; Wednesday = 'Mi'; Thursday = 'Do'; Friday = 'Fr'; Saturday = 'Sa'; Sunday = 'So' }
+foreach ($day in @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')) {
+    $window = $config.Windows[$day]
+    if ($window) {
+        $hinweis = if ($window.CrossesMidnight) { ' (bis zum Folgetag)' } else { '' }
+        Write-Host ('                {0}  {1:hh\:mm} - {2:hh\:mm}{3}' -f $kurz[$day], $window.On, $window.Off, $hinweis)
+    } else {
+        Write-Host ('                {0}  aus' -f $kurz[$day]) -ForegroundColor DarkGray
+    }
+}
 
 
 # ------------------------------------------------------------ 2. Energieoptionen
@@ -149,12 +151,8 @@ function New-WallInteractiveAction {
         -Argument ('"{0}" "{1}" {2}' -f (Get-WallPaths).LauncherVbs, (Get-WallPaths).ScriptFile, $ActionName)
 }
 
-# New-WallDailyTrigger liegt im Modul, weil der Abgleich (Action Sync) die
-# Startzeiten ebenfalls nachzieht.
-
-$sleepAt = ([datetime]::Today).Add($config.SleepTimeOfDay)
-$wakeAt  = ([datetime]::Today).Add($config.WakeTimeOfDay)
-$prewakeAt = $wakeAt.AddMinutes(-[double]$config.WakePreRollMinutes)
+# Get-WallScheduleTriggers liegt im Modul, weil der Abgleich (Action Sync) die
+# Ausloeser ebenfalls nachzieht.
 
 $interactivePrincipal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Highest
 $systemPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -167,11 +165,11 @@ $sleepSettings = New-ScheduledTaskSettingsSet `
 $sleepSettings.StartWhenAvailable = $false
 
 Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Sleep -Force `
-    -Description 'Wandpanel: Bildschirm aus und Energiesparmodus zur Nachtzeit' `
+    -Description 'Wandpanel: Bildschirm aus und Energiesparmodus am Fensterende' `
     -Action (New-WallInteractiveAction -ActionName 'Sleep') `
-    -Trigger (New-WallDailyTrigger -At $sleepAt) `
+    -Trigger (Get-WallScheduleTriggers -Config $config -Kind 'Sleep') `
     -Principal $interactivePrincipal -Settings $sleepSettings | Out-Null
-Write-Host ('Aufgabe       : {0}{1} taeglich {2:HH:mm}' -f $tasks.Path, $tasks.Sleep, $sleepAt) -ForegroundColor Green
+Write-Host ('Aufgabe       : {0}{1} ({2} Ausloeser)' -f $tasks.Path, $tasks.Sleep, @(Get-WallScheduleTriggers -Config $config -Kind 'Sleep').Count) -ForegroundColor Green
 
 # Aufwachzeitgeber als SYSTEM: holt das Geraet unabhaengig von der
 # Benutzersitzung aus dem Standby.
@@ -184,9 +182,9 @@ Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Prewake -Force `
     -Description 'Wandpanel: holt das Geraet per Aufwachzeitgeber aus dem Energiesparmodus' `
     -Action (New-ScheduledTaskAction -Execute 'powershell.exe' `
         -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action Prewake' -f $paths.ScriptFile)) `
-    -Trigger (New-WallDailyTrigger -At $prewakeAt) `
+    -Trigger (Get-WallScheduleTriggers -Config $config -Kind 'Prewake') `
     -Principal $systemPrincipal -Settings $prewakeSettings | Out-Null
-Write-Host ('Aufgabe       : {0}{1} taeglich {2:HH:mm} (weckt das Geraet)' -f $tasks.Path, $tasks.Prewake, $prewakeAt) -ForegroundColor Green
+Write-Host ('Aufgabe       : {0}{1} ({2} Ausloeser, weckt das Geraet)' -f $tasks.Path, $tasks.Prewake, @(Get-WallScheduleTriggers -Config $config -Kind 'Prewake').Count) -ForegroundColor Green
 
 # Weck-Aufgabe in der Benutzersitzung: schaltet den Bildschirm ein. Zusaetzlich
 # ebenfalls mit Aufwachzeitgeber, als zweite Absicherung. StartWhenAvailable
@@ -196,11 +194,17 @@ $wakeSettings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable `
     -ExecutionTimeLimit ([timespan]::FromMinutes(5)) -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Wake -Force `
-    -Description 'Wandpanel: Bildschirm zur Weckzeit einschalten' `
+    -Description 'Wandpanel: Bildschirm zum Fensterbeginn einschalten' `
     -Action (New-WallInteractiveAction -ActionName 'Wake') `
-    -Trigger (New-WallDailyTrigger -At $wakeAt) `
+    -Trigger (Get-WallScheduleTriggers -Config $config -Kind 'Wake') `
     -Principal $interactivePrincipal -Settings $wakeSettings | Out-Null
-Write-Host ('Aufgabe       : {0}{1} taeglich {2:HH:mm}' -f $tasks.Path, $tasks.Wake, $wakeAt) -ForegroundColor Green
+Write-Host ('Aufgabe       : {0}{1} ({2} Ausloeser)' -f $tasks.Path, $tasks.Wake, @(Get-WallScheduleTriggers -Config $config -Kind 'Wake').Count) -ForegroundColor Green
+
+# Festhalten, zu welchem Wochenplan die Ausloeser gesetzt wurden. Stimmt das
+# spaeter nicht mehr, wagt das Panel keinen Standby.
+$state = Get-WallState
+$state.TaskScheduleFingerprint = Get-ScheduleFingerprint -Config $config
+Save-WallState $state
 
 # Abgleich-Aufgabe als SYSTEM: holt den Zeitplan vom Server und bringt den
 # Zustand in Deckung. Als SYSTEM, weil das Aendern der Aufgaben-Startzeiten
@@ -224,7 +228,8 @@ if ($PSBoundParameters.ContainsKey('ServerUrl') -and -not [string]::IsNullOrWhit
 
     # Taeglicher Ausloeser um 00:00 mit Wiederholung, damit der Abgleich rund um
     # die Uhr laeuft und einen Neustart ohne Zutun uebersteht.
-    $syncTrigger = New-WallDailyTrigger -At ([datetime]::Today)
+    $syncTrigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today)
+$syncTrigger.StartBoundary = ([datetime]::Today).ToString('yyyy-MM-ddTHH:mm:ss')
     $syncTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At ([datetime]::Today) `
         -RepetitionInterval (New-TimeSpan -Minutes $PollMinutes) `
         -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
@@ -248,7 +253,7 @@ if ($PSBoundParameters.ContainsKey('ServerUrl') -and -not [string]::IsNullOrWhit
     }
 }
 
-Write-WallLog ('Einrichtung abgeschlossen: Schlafen {0}, Aufwachen {1}, Modus {2}, Konto {3}.' -f $config.SleepTime, $config.WakeTime, $config.Mode, $UserId)
+Write-WallLog ('Einrichtung abgeschlossen: Modus {0}, Konto {1}.' -f $config.Mode, $UserId)
 
 
 # -------------------------------------------------------------------- 5. Pruefung

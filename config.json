@@ -1,6 +1,16 @@
 {
-  "SleepTime": "22:00",
-  "WakeTime": "06:00",
+  "_hinweis": "Zeiten je Wochentag, an denen das Panel AN ist. Ausserhalb schlaeft es. Ist 'Off' kleiner oder gleich 'On', reicht das Fenster ueber Mitternacht in den Folgetag. Ein Tag mit null bleibt den ganzen Tag aus.",
+
+  "Schedule": {
+    "Monday":    { "On": "18:00", "Off": "22:00" },
+    "Tuesday":   { "On": "18:00", "Off": "22:00" },
+    "Wednesday": { "On": "18:00", "Off": "22:00" },
+    "Thursday":  { "On": "18:00", "Off": "22:00" },
+    "Friday":    { "On": "17:00", "Off": "02:00" },
+    "Saturday":  { "On": "17:00", "Off": "02:00" },
+    "Sunday":    { "On": "16:00", "Off": "23:00" }
+  },
+
   "Mode": "Combined",
   "Enabled": true,
 
