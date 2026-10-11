@@ -203,7 +203,7 @@ Diese Punkte sollten stimmen:
 | --- | --- |
 | Wochenplan | deine Zeiten |
 | Panel soll jetzt | passend zur aktuellen Uhrzeit |
-| Aufgaben Sleep / WakeTimer / Wake | eingerichtet, „weckt auf: ja" bei WakeTimer |
+| Aufgaben Sleep / WakeTimer / Wake / Sync | alle vier eingerichtet, „weckt auf: ja" bei WakeTimer |
 | Schlafzustände | `S3` (oder `S0` bei Modern Standby) |
 | Aufwachzeitgeber | erlaubt |
 | **Anmeldung nach Wecken** | **nein** |
@@ -424,6 +424,7 @@ Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 | Morgens Sperrbildschirm statt Strichliste | `-Action Status` → „Anmeldung nach Wecken". Steht dort JA, überschreibt eine Gruppenrichtlinie die Einstellung. |
 | Bild bleibt nach dem Aufwachen schwarz | Meist der Grafiktreiber nach Resume. `"Mode": "DisplayOnly"` ist dann robuster. |
 | Status meldet „Modus (aktiv): DisplayOnly", obwohl `Combined` eingestellt ist | Automatische Rückstufung nach zwei misslungenen Aufwach-Versuchen. Grund steht unter „Hinweis". Nach Behebung: `-Action Reset`. |
+| Panel lief eine ganze Nacht durch | Protokoll prüfen. Fehlte der Auslöser (Stromausfall, Zeitumstellung, kein angemeldeter Benutzer), holt die `Sync`-Aufgabe das nach – `-Action Status` muss sie als eingerichtet zeigen. |
 | Anzeige veraltet nach langer Pause | Browser lädt nicht neu, siehe Tipp in 1.4. |
 | Panel erscheint nicht auf dem Server | `-Action Status` → „Fernsteuerung" zeigt den letzten Fehler. Meist Token oder Adresse falsch. |
 

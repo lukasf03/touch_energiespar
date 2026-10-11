@@ -33,14 +33,14 @@ Status` zeigt die erkannte Sprache rein zur Information an.
 
 ## Wie es funktioniert
 
-Drei geplante Aufgaben greifen ineinander:
+Vier geplante Aufgaben greifen ineinander:
 
 | Aufgabe | Zeitpunkt | Konto | Zweck |
 | --- | --- | --- | --- |
 | `\WallDisplayPower\Sleep` | Fensterende | angemeldeter Benutzer | Bildschirm aus, danach Standby |
 | `\WallDisplayPower\WakeTimer` | Fensterbeginn − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
 | `\WallDisplayPower\Wake` | Fensterbeginn | angemeldeter Benutzer | Bildschirm ein, Ruhe-Aufgabe beenden |
-| `\WallDisplayPower\Sync` | alle 5 Minuten | SYSTEM | Zeitplan vom Server holen, Zustand abgleichen (optional) |
+| `\WallDisplayPower\Sync` | alle 5 bzw. 15 Minuten | SYSTEM | Zustand mit dem Wochenplan abgleichen, mit Server zusätzlich den Zeitplan holen |
 
 Warum diese Aufteilung:
 
@@ -52,6 +52,24 @@ Warum diese Aufteilung:
   wird. `Wake` hat denselben Zeitgeber zusätzlich als zweite Absicherung.
 - Die Auslösezeiten sind als **Ortszeit** eingetragen, nicht als UTC. Damit
   bleiben 22:00 und 06:00 auch nach der Zeitumstellung 22:00 und 06:00.
+
+### Das Sicherheitsnetz
+
+Die Abgleich-Aufgabe `Sync` wird **immer** eingerichtet, auch ohne Server. Sie
+vergleicht regelmäßig, ob das Panel gerade an oder aus sein soll, und zieht
+nach. Das fängt jeden verpassten Auslöser auf:
+
+- Stromausfall außerhalb der Fenster – das Gerät bootet um 23:00, der
+  Sleep-Auslöser von 22:00 ist längst vorbei
+- beim Fensterende war noch kein Benutzer angemeldet, die Sleep-Aufgabe konnte
+  also nicht starten
+- die Nacht der Zeitumstellung im März: die Ortszeit 02:00 gibt es nicht, der
+  Auslöser für Freitag- und Samstagnacht zündet daher nicht
+
+Ohne dieses Netz würde das Panel in solchen Fällen bis zum nächsten Abend
+durchlaufen, ohne dass es auffällt. Mit Server läuft der Abgleich alle 5
+Minuten, ohne Server alle 15 – dort ist er nur Reserve und muss nicht so oft
+laufen (`-PollMinutes` überschreibt beides).
 
 ### Betriebsmodi
 
@@ -114,8 +132,9 @@ Das Panel erscheint nach dem ersten Abruf automatisch in der Weboberfläche. Die
 Zugangsdaten landen in `C:\ProgramData\WallDisplayPower\sync.json`, lesbar nur
 für SYSTEM und Administratoren.
 
-Ohne `-ServerUrl` bleibt alles wie vorher: das Panel arbeitet rein mit seiner
-lokalen `config.json`.
+Ohne `-ServerUrl` arbeitet das Panel rein mit seiner lokalen `config.json`. Die
+Abgleich-Aufgabe läuft dann trotzdem, fragt aber nichts ab – sie dient nur als
+[Sicherheitsnetz](#das-sicherheitsnetz).
 
 ### Was sich einstellen lässt
 
@@ -298,7 +317,7 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -Us
 - Ruhezustand abschalten, damit das Gerät wirklich in den Standby (S3) geht und
   nicht in den Ruhezustand (S4) – das schaltet gleichzeitig den Schnellstart ab
   (mit `-KeepHibernate` unterdrückbar)
-- die drei Aufgaben registrieren
+- die vier Aufgaben registrieren
 
 3. **Selbsttest ausführen** – das ist der entscheidende Schritt:
 

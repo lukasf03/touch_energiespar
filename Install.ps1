@@ -13,6 +13,10 @@
                                    SYSTEM und holt das Geraet per
                                    Aufwachzeitgeber aus dem Standby
       \WallDisplayPower\Wake       zur Weckzeit, schaltet den Bildschirm ein
+      \WallDisplayPower\Sync       regelmaessiger Abgleich: holt - sofern
+                                   eingerichtet - den Zeitplan vom Server und
+                                   zieht in jedem Fall den tatsaechlichen
+                                   Zustand auf den Wochenplan nach
 
 .PARAMETER Mode
     Betriebsart ausserhalb der Aktiv-Fenster.
@@ -34,8 +38,8 @@
 
 .PARAMETER ServerUrl
     Adresse des Steuerungsservers, z. B. https://panel.example.org. Damit
-    kommt eine vierte Aufgabe hinzu, die den Zeitplan regelmaessig abholt.
-    Ohne diesen Parameter laeuft das Panel rein mit der lokalen Konfiguration.
+    holt die Abgleich-Aufgabe zusaetzlich den Zeitplan von dort. Ohne diesen
+    Parameter laeuft das Panel rein mit der lokalen Konfiguration.
 
 .PARAMETER PanelId
     Kennung dieses Panels auf dem Server. Standard ist der Computername.
@@ -44,7 +48,9 @@
     Gemeinsames Token der Panel-Schnittstelle (PANEL_TOKEN des Servers).
 
 .PARAMETER PollMinutes
-    Abstand der Abfragen. Standard 5 Minuten.
+    Abstand der Abgleiche. Standard 5 Minuten mit Server, sonst 15 - ohne
+    Server ist der Abgleich nur ein Sicherheitsnetz und muss nicht so oft
+    laufen.
 
 .PARAMETER AllowInsecureHttp
     Erlaubt http statt https. Nur fuer Tests im eigenen Netz.
@@ -206,10 +212,23 @@ $state = Get-WallState
 $state.TaskScheduleFingerprint = Get-ScheduleFingerprint -Config $config
 Save-WallState $state
 
-# Abgleich-Aufgabe als SYSTEM: holt den Zeitplan vom Server und bringt den
-# Zustand in Deckung. Als SYSTEM, weil das Aendern der Aufgaben-Startzeiten
-# Administratorrechte braucht.
-if ($PSBoundParameters.ContainsKey('ServerUrl') -and -not [string]::IsNullOrWhiteSpace($ServerUrl)) {
+# Abgleich-Aufgabe als SYSTEM. Sie hat zwei Aufgaben in einer, und die zweite
+# ist auch ohne Server noetig:
+#
+#   1. Mit Server holt sie den Zeitplan und meldet den Zustand zurueck.
+#   2. Immer prueft sie, ob das Panel gerade an oder aus sein soll, und zieht
+#      nach. Das ist das Netz fuer jeden verpassten Ausloeser - Stromausfall
+#      ausserhalb der Fenster, beim Fensterende noch kein angemeldeter
+#      Benutzer, oder die Nacht der Zeitumstellung im Maerz, in der es die
+#      Ortszeit 02:00 gar nicht gibt. Ohne dieses Netz liefe das Panel in
+#      solchen Faellen bis zum naechsten Abend durch, ohne dass es auffaellt.
+#
+# Als SYSTEM, weil das Aendern der Aufgaben-Startzeiten Administratorrechte
+# braucht.
+
+$hasServer = $PSBoundParameters.ContainsKey('ServerUrl') -and -not [string]::IsNullOrWhiteSpace($ServerUrl)
+
+if ($hasServer) {
     if ([string]::IsNullOrWhiteSpace($ApiToken)) {
         throw '-ServerUrl ohne -ApiToken: das Panel koennte sich nicht anmelden.'
     }
@@ -225,33 +244,42 @@ if ($PSBoundParameters.ContainsKey('ServerUrl') -and -not [string]::IsNullOrWhit
     if (-not (Get-SyncConfig)) {
         throw 'Die Fernsteuerungs-Einstellungen wurden abgelehnt, siehe Protokoll. Bitte ServerUrl und Token pruefen.'
     }
-
-    # Taeglicher Ausloeser um 00:00 mit Wiederholung, damit der Abgleich rund um
-    # die Uhr laeuft und einen Neustart ohne Zutun uebersteht.
-    $syncTrigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today)
-$syncTrigger.StartBoundary = ([datetime]::Today).ToString('yyyy-MM-ddTHH:mm:ss')
-    $syncTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At ([datetime]::Today) `
-        -RepetitionInterval (New-TimeSpan -Minutes $PollMinutes) `
-        -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
-
-    $syncSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit ([timespan]::FromMinutes(10)) -MultipleInstances IgnoreNew
-
-    Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Sync -Force `
-        -Description 'Wandpanel: Zeitplan vom Server holen und Zustand abgleichen' `
-        -Action (New-ScheduledTaskAction -Execute 'powershell.exe' `
-            -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action Sync' -f $paths.ScriptFile)) `
-        -Trigger $syncTrigger -Principal $systemPrincipal -Settings $syncSettings | Out-Null
-    Write-Host ('Aufgabe       : {0}{1} alle {2} Minuten' -f $tasks.Path, $tasks.Sync, $PollMinutes) -ForegroundColor Green
+} elseif (Test-Path -LiteralPath $paths.SyncFile) {
+    Write-Host 'Fernsteuerung : bleibt wie eingerichtet (sync.json unveraendert)' -ForegroundColor DarkGray
 } else {
-    $existing = Get-WallTask -Name $tasks.Sync
-    if ($existing) {
-        Write-Host ('Aufgabe       : {0}{1} bleibt unveraendert (keine -ServerUrl angegeben)' -f $tasks.Path, $tasks.Sync) -ForegroundColor DarkGray
-    } else {
-        Write-Host 'Fernsteuerung : nicht eingerichtet (ohne -ServerUrl laeuft das Panel rein lokal)' -ForegroundColor DarkGray
-    }
+    Write-Host 'Fernsteuerung : nicht eingerichtet (Panel arbeitet rein mit der lokalen Konfiguration)' -ForegroundColor DarkGray
 }
+
+# Ohne Server ist der Abgleich nur ein Netz und muss nicht alle 5 Minuten
+# laufen. Ein ausdruecklich angegebenes -PollMinutes gilt in jedem Fall.
+$syncConfigured = $hasServer -or (Test-Path -LiteralPath $paths.SyncFile)
+$pollMinutes = if ($syncConfigured -or $PSBoundParameters.ContainsKey('PollMinutes')) { $PollMinutes } else { 15 }
+
+# Taeglicher Ausloeser um 00:00 mit Wiederholung, damit der Abgleich rund um
+# die Uhr laeuft und einen Neustart ohne Zutun uebersteht.
+$syncTrigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today)
+$syncTrigger.StartBoundary = ([datetime]::Today).ToString('yyyy-MM-ddTHH:mm:ss')
+$syncTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At ([datetime]::Today) `
+    -RepetitionInterval (New-TimeSpan -Minutes $pollMinutes) `
+    -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
+
+$syncSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([timespan]::FromMinutes(10)) -MultipleInstances IgnoreNew
+
+$syncDescription = if ($syncConfigured) {
+    'Wandpanel: Zeitplan vom Server holen und Zustand abgleichen'
+} else {
+    'Wandpanel: Zustand mit dem Wochenplan abgleichen (Netz fuer verpasste Ausloeser)'
+}
+
+Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Sync -Force `
+    -Description $syncDescription `
+    -Action (New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action Sync' -f $paths.ScriptFile)) `
+    -Trigger $syncTrigger -Principal $systemPrincipal -Settings $syncSettings | Out-Null
+Write-Host ('Aufgabe       : {0}{1} alle {2} Minuten{3}' -f $tasks.Path, $tasks.Sync, $pollMinutes,
+    $(if ($syncConfigured) { '' } else { ' (nur Abgleich, kein Server)' })) -ForegroundColor Green
 
 Write-WallLog ('Einrichtung abgeschlossen: Modus {0}, Konto {1}.' -f $config.Mode, $UserId)
 
