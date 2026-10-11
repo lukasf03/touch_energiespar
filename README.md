@@ -99,7 +99,9 @@ Steuerung sich selbst:
 - Vor dem ersten Standby wird geprüft, ob eine Aufgabe mit Aufwachzeitgeber
   existiert, ob Aufwachzeitgeber im Energieschema erlaubt sind und ob
   `powercfg /a` überhaupt einen Standby-Zustand meldet. Fehlt etwas, bleibt es
-  bei **Bildschirm aus**.
+  bei **Bildschirm aus** – aber nicht endgültig: Die Nachkontrolle prüft alle
+  5 Minuten, ob die Voraussetzung inzwischen erfüllt ist, und holt den Standby
+  dann noch in derselben Nacht nach.
 - Verweigert das Gerät den Standby, wird sofort auf `DisplayOnly` zurückgestuft.
 - Wacht das Gerät mehr als 10 Minuten zu spät auf, zählt das als Fehlversuch.
   Nach 2 Fehlversuchen in Folge läuft die Steuerung dauerhaft in `DisplayOnly`
@@ -358,6 +360,7 @@ Während des Tests nichts berühren. Danach steht im Klartext, ob der Modus
 | `MinimumSuspendSeconds` | `30` | kürzerer „Standby" gilt als gescheitert |
 | `MaxSuspendRetries` | `20` | Grenze für erneute Standby-Versuche je Ruhephase |
 | `KeepDisplayOffIntervalSeconds` | `20` | Takt des Bildschirm-Wächters |
+| `StandbyRetryProbeSeconds` | `300` | Takt, in dem der Wächter prüft, ob ein übersprungener Standby wieder möglich ist |
 | `Enabled` | `true` | Zeitplan aktiv; `false` lässt das Panel durchlaufen |
 
 Im Wochenplan gilt: Ist `Off` kleiner als `On`, reicht das Fenster über
@@ -391,6 +394,12 @@ den Bildschirm aus und geht nicht in den Standby – so ist es gewollt, denn mit
 veralteten Auslösern würde es zur falschen Zeit aufwachen. Gelingt das
 Nachziehen dreimal nicht (etwa weil eine Aufgabe fehlt), steht das als `ERROR`
 im Protokoll und `Install.ps1` muss von Hand laufen.
+
+Das gilt auch, wenn die Änderung mitten in den Fensterwechsel fällt: Hat das
+Panel den Standby schon übersprungen und hält nur den Bildschirm aus, prüft es
+alle 5 Minuten nach und legt sich noch in derselben Nacht hin, sobald die
+Auslöser passen. Es kostet also keine Nacht mehr, kurz vor Feierabend noch die
+Zeiten zu ändern.
 
 Mit angebundenem Server werden `Schedule`, `Mode` und `Enabled` bei jedem
 Abruf überschrieben – dort ist der Server die Quelle, und eine örtliche

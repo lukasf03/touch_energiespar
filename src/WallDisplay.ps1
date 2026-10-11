@@ -61,7 +61,9 @@ function Invoke-SleepAction {
     Set-DisplayPower -State Off
 
     if ($mode -eq 'DisplayOnly') {
-        Invoke-KeepDisplayOff
+        # Kein -RetryStandby: In diesem Modus ist "kein Standby" die Absicht,
+        # nicht ein Hindernis, das sich beheben liesse.
+        Invoke-KeepDisplayOff | Out-Null
         return
     }
 
@@ -93,7 +95,7 @@ function Invoke-SleepAction {
         $wakeTarget = Get-NextWindowStart -Windows $config.Windows
         if (-not $wakeTarget) {
             Write-WallLog -Level WARN 'Der Wochenplan enthaelt kein naechstes Fenster, kein Standby.'
-            Invoke-KeepDisplayOff
+            if (Invoke-KeepDisplayOff -RetryStandby) { continue }
             return
         }
 
@@ -106,7 +108,13 @@ function Invoke-SleepAction {
         $precondition = Test-SuspendPrecondition -Config $config -State $state
         if (-not $precondition.Ok) {
             Write-WallLog -Level WARN ('Standby uebersprungen: {0}' -f ($precondition.Reasons -join ' '))
-            Invoke-KeepDisplayOff
+
+            # Mit -RetryStandby, weil genau dieser Fall behebbar ist: Zieht der
+            # Abgleich die Aufwach-Ausloeser nach, soll das Panel noch in
+            # derselben Nacht in den Standby gehen und nicht erst am naechsten
+            # Abend. Ohne das kostete eine Aenderung kurz vor Fensterende eine
+            # ganze Nacht.
+            if (Invoke-KeepDisplayOff -RetryStandby) { continue }
             return
         }
 
@@ -124,8 +132,10 @@ function Invoke-SleepAction {
 
         if (-not $accepted -or $slept.TotalSeconds -lt [double]$config.MinimumSuspendSeconds) {
             Write-WallLog -Level WARN ('Standby nicht moeglich (Rueckgabe={0}, Dauer={1} s).' -f $accepted, [int]$slept.TotalSeconds)
+            # Kein -RetryStandby: Set-FallbackMode hat gerade auf 'DisplayOnly'
+            # zurueckgestuft. Ein neuer Versuch wuerde dagegen anlaufen.
             Set-FallbackMode -Reason 'Das Geraet wechselt nicht in den Energiesparmodus.'
-            Invoke-KeepDisplayOff
+            Invoke-KeepDisplayOff | Out-Null
             return
         }
 
@@ -138,8 +148,10 @@ function Invoke-SleepAction {
 
         $retries++
         if ($retries -ge [int]$config.MaxSuspendRetries) {
+            # Kein -RetryStandby: Die Grenze ist die Entscheidung, es fuer
+            # diese Nacht aufzugeben.
             Write-WallLog -Level WARN ('Nach {0} unerwarteten Aufwach-Vorgaengen bleibt es bis zum Fensterende beim ausgeschalteten Bildschirm.' -f $retries)
-            Invoke-KeepDisplayOff
+            Invoke-KeepDisplayOff | Out-Null
             return
         }
 
@@ -192,6 +204,27 @@ function Invoke-FinalScheduleCheck {
     }
 }
 
+function Test-StandbyPossibleAgain {
+    <#
+        Ist der Standby inzwischen wieder moeglich?
+
+        Drei Dinge muessen zutreffen: Der Modus muss ueberhaupt einen Standby
+        vorsehen - eine automatische Rueckstufung auf 'DisplayOnly' gilt also
+        weiter -, der Wochenplan muss ein naechstes Fenster enthalten, und die
+        Voraussetzungen muessen erfuellt sein.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $config = Get-WallConfig
+    $state = Get-WallState
+
+    if ((Resolve-EffectiveMode -Config $config -State $state) -eq 'DisplayOnly') { return $false }
+    if (-not (Get-NextWindowStart -Windows $config.Windows)) { return $false }
+
+    return (Test-SuspendPrecondition -Config $config -State $state).Ok
+}
+
 function Invoke-KeepDisplayOff {
     <#
         Haelt den Bildschirm aus, solange das Zeitfenster gilt. Notwendig, weil
@@ -200,21 +233,50 @@ function Invoke-KeepDisplayOff {
         Abbruchbedingung ist absichtlich das Zeitfenster und nicht eine fest
         berechnete Weckzeit: so endet die Schleife auch dann, wenn der Zeitplan
         waehrend der Nacht von aussen geaendert wird.
+
+        Mit -RetryStandby prueft sie zusaetzlich in groesseren Abstaenden, ob
+        der Standby wieder moeglich geworden ist - etwa weil der Abgleich die
+        Aufwach-Ausloeser nachgezogen hat. Rueckgabe $true heisst dann:
+        nochmal versuchen. Ohne den Schalter ist die Rueckgabe immer $false.
+
+        Die Pruefung laeuft bewusst nicht im Takt der Bildschirm-Nachkontrolle:
+        sie ruft powercfg auf und fragt die Aufgabenplanung ab, was alle 20
+        Sekunden eine ganze Nacht lang mehr Strom kosten wuerde als der
+        Standby einspart.
     #>
     [CmdletBinding()]
-    param()
+    param([switch]$RetryStandby)
 
-    $interval = [math]::Max(5, [int](Get-WallConfig).KeepDisplayOffIntervalSeconds)
-    Write-WallLog ('Bildschirm bleibt bis zum Fensterende aus, Nachkontrolle alle {0} s.' -f $interval)
+    $config = Get-WallConfig
+    $interval = [math]::Max(5, [int]$config.KeepDisplayOffIntervalSeconds)
+    $probeSeconds = [math]::Max($interval, [int]$config.StandbyRetryProbeSeconds)
+
+    if ($RetryStandby) {
+        Write-WallLog ('Bildschirm bleibt aus, Nachkontrolle alle {0} s. Alle {1} s wird geprueft, ob der Standby wieder moeglich ist.' -f $interval, $probeSeconds)
+    } else {
+        Write-WallLog ('Bildschirm bleibt bis zum Fensterende aus, Nachkontrolle alle {0} s.' -f $interval)
+    }
+
+    $nextProbe = (Get-Date).AddSeconds($probeSeconds)
 
     while (Test-WallNightMode) {
         Set-DisplayPower -State Off -Quiet
+
         if (-not (Wait-WallInterval -Seconds $interval)) {
             Write-WallLog 'Weck-Signal empfangen, Nachkontrolle beendet.'
-            return
+            return $false
+        }
+
+        if ($RetryStandby -and (Get-Date) -ge $nextProbe) {
+            $nextProbe = (Get-Date).AddSeconds($probeSeconds)
+            if (Test-StandbyPossibleAgain) {
+                Write-WallLog 'Standby ist wieder moeglich, neuer Versuch noch in dieser Nacht.'
+                return $true
+            }
         }
     }
     Write-WallLog 'Nachkontrolle beendet (Zeitfenster vorbei).'
+    return $false
 }
 
 

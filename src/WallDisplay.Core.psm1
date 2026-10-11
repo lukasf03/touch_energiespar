@@ -48,6 +48,7 @@ $script:ConfigDefaults = @{
     MinimumSuspendSeconds         = 30
     MaxSuspendRetries             = 20
     KeepDisplayOffIntervalSeconds = 20
+    StandbyRetryProbeSeconds      = 300
     LogRetentionBytes             = 2097152
 }
 
