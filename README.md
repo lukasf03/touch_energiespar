@@ -5,8 +5,12 @@ Seite anzeigt (hier: `https://strichliste.dpsg-franziskus.de/#/monitor`).
 
 Ein Wochenplan legt fest, wann das Panel **an** ist. Außerhalb dieser Fenster
 geht der Bildschirm aus und das Gerät in den Energiesparmodus; zum nächsten
-Fensterbeginn wacht es von selbst wieder auf. Rein zeitgesteuert – eine
-Berührung weckt das Gerät außerhalb der Fenster nicht auf.
+Fensterbeginn wacht es von selbst wieder auf.
+
+Rein zeitgesteuert: Die Einrichtung nimmt Touchscreen, Tastatur und Maus das
+Weckrecht, eine Berührung holt das Panel außerhalb der Fenster also nicht aus
+dem Energiesparmodus. Netzwerkadapter bleiben ausgenommen, damit Wake-on-LAN
+weiter möglich ist (abschaltbar mit `-KeepDeviceWake`).
 
 Standardplan:
 
@@ -317,6 +321,9 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -Us
 - Ruhezustand abschalten, damit das Gerät wirklich in den Standby (S3) geht und
   nicht in den Ruhezustand (S4) – das schaltet gleichzeitig den Schnellstart ab
   (mit `-KeepHibernate` unterdrückbar)
+- Touchscreen, Tastatur und Maus das Weckrecht nehmen, damit eine Berührung das
+  Panel nachts nicht aus dem Standby holt; Netzwerkadapter behalten es (mit
+  `-KeepDeviceWake` unterdrückbar)
 - die vier Aufgaben registrieren
 
 3. **Selbsttest ausführen** – das ist der entscheidende Schritt:
@@ -395,6 +402,17 @@ Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 - **Ruhezustand aktiv**: Geht das Gerät in S4 statt S3, dauert das Aufwachen
   lange und die Sitzung kann wegbrechen. `Install.ps1` schaltet ihn deshalb ab.
 
+### Wenn das Panel nachts von selbst aufwacht
+
+`-Action Status` zeigt unter „Weckberechtigte Geräte", wer das Gerät aus dem
+Standby holen darf. Steht dort ein Touchscreen, eine Tastatur oder eine Maus,
+hat das Gerät sein Weckrecht zurückbekommen – das passiert nach manchen
+Treiber- und Windows-Updates. Abhilfe: `Install.ps1` erneut laufen lassen.
+
+Im Protokoll steht das Gegenstück dazu: „Unerwartetes Aufwachen vor der
+Weckzeit, erneuter Standby in 15 s." Die Steuerung legt das Gerät also von
+selbst wieder hin, aber jeder Vorgang kostet Strom und zeigt die Seite kurz an.
+
 ### Wenn das Bild nach dem Aufwachen schwarz bleibt
 
 `Wake` schaltet das Panel über drei Wege ein (Leerlaufzähler zurücksetzen,
@@ -419,7 +437,9 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Uninstall.ps1
 
 Mit `-RemoveData` werden zusätzlich Konfiguration, Zustand und Protokoll
 gelöscht, mit `-RestorePowerDefaults` die Energieoptionen auf übliche Werte
-zurückgesetzt.
+zurückgesetzt – dazu gehört das Weckrecht der Eingabegeräte. Ohne diesen
+Schalter bleibt es entzogen, und das Gerät lässt sich weiterhin nicht per Touch
+aufwecken; die Deinstallation weist darauf hin.
 
 ---
 

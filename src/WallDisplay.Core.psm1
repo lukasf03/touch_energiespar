@@ -19,6 +19,10 @@ $script:GuidHybridSleep = '94ac6d29-73ce-41a6-809f-6363ba21b47e'
 $script:GuidSubNone     = 'fea3413e-7e05-4911-9a71-700331f1c294'
 $script:GuidConsoleLock = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
 
+# Geraeteklasse "Netzwerkadapter". Auch das ist eine GUID und damit
+# sprachunabhaengig - der angezeigte Klassenname ist uebersetzt.
+$script:ClassGuidNet    = '4d36e972-e325-11ce-bfc1-08002be10318'
+
 $script:AgentVersion = '1.1.0'
 
 $script:WeekDays = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
@@ -451,6 +455,11 @@ function Get-WallState {
         # Fingerabdruck des Wochenplans, zu dem die Aufgaben-Ausloeser zuletzt
         # gesetzt wurden. Passt er nicht mehr, wird kein Standby gewagt.
         TaskScheduleFingerprint = $null
+
+        # Geraete, denen die Einrichtung das Weckrecht genommen hat. Nur die
+        # gibt die Deinstallation wieder frei - alles andere waere ein Eingriff
+        # in Einstellungen, die die Steuerung nie angefasst hat.
+        DisabledWakeDevices     = @()
 
         SyncLastSuccessUtc      = $null
         SyncConsecutiveFailures = 0
@@ -960,6 +969,202 @@ function Set-WallPowerPolicy {
         }
     }
     Write-WallLog 'Energieoptionen fuer den Dauerbetrieb gesetzt.'
+}
+
+
+# --------------------------------------------------------- Weckrecht Geraete
+
+function Get-WallDeviceQuery {
+    <#
+        Eine Abfrage 'powercfg /devicequery <Query>' als Liste von Namen.
+        Leere Zeilen fallen weg. Scheitert der Aufruf, ist die Liste leer.
+
+        -Raw dient dem Test ohne powercfg-Aufruf.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Query,
+        [AllowNull()][string]$Raw,
+        [switch]$HasRaw
+    )
+
+    if ($HasRaw) {
+        $text = [string]$Raw
+    } else {
+        try {
+            $text = (& powercfg.exe /devicequery $Query) -join "`n"
+        } catch {
+            Write-WallLog -Level WARN ("'powercfg /devicequery {0}' nicht ausfuehrbar: {1}" -f $Query, $_.Exception.Message)
+            return @()
+        }
+    }
+
+    return @($text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-WakeArmedDevices {
+    <#
+        Geraete, die das Panel aus dem Energiesparmodus holen duerfen.
+
+        Der Aufwachzeitgeber der geplanten Aufgaben ist davon nicht betroffen:
+        Die Uhr des Rechners ist kein Geraet und steht in dieser Liste nicht.
+
+        Ist kein einziges Geraet weckberechtigt, gibt powercfg statt einer
+        Liste eine uebersetzte Hinweiszeile aus ("NONE", "KEINE", ...). Sie
+        wird auf zwei Wegen ausgesondert, beide ohne Vergleich mit
+        uebersetztem Text:
+
+          1. Jeder Name muss auch in 'wake_programmable' stehen - ein
+             weckberechtigtes Geraet ist immer auch programmierbar.
+          2. Mit -Map muss der Name zusaetzlich einem vorhandenen Geraet
+             entsprechen. Noetig fuer den Fall, dass gar kein Geraet
+             programmierbar ist: dann steht der Hinweistext in beiden Listen
+             und Regel 1 allein greift nicht.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][string]$ArmedRaw,
+        [AllowNull()][string]$ProgrammableRaw,
+        [hashtable]$Map
+    )
+
+    $armed = @(Get-WallDeviceQuery -Query 'wake_armed' -Raw $ArmedRaw `
+        -HasRaw:($PSBoundParameters.ContainsKey('ArmedRaw')))
+    if ($armed.Count -eq 0) { return @() }
+
+    $programmable = @(Get-WallDeviceQuery -Query 'wake_programmable' -Raw $ProgrammableRaw `
+        -HasRaw:($PSBoundParameters.ContainsKey('ProgrammableRaw')))
+    if ($programmable.Count -eq 0) { return @() }
+
+    $names = @($armed | Where-Object { $programmable -contains $_ })
+
+    # Ohne Geraeteliste bleibt es bei Regel 1 - besser eine unsichere Liste
+    # als keine.
+    if (-not $PSBoundParameters.ContainsKey('Map') -or $Map.Count -eq 0) { return $names }
+
+    return @($names | Where-Object { Resolve-WallDeviceClass -Name $_ -Map $Map })
+}
+
+function Get-WallPnpClassMap {
+    <#
+        Tabelle Geraetename -> Klassen-GUID (ohne geschweifte Klammern).
+        Leer, wenn sich die Geraeteliste nicht lesen laesst.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $map = @{}
+    try {
+        foreach ($device in (Get-PnpDevice -PresentOnly -ErrorAction Stop)) {
+            $name = [string]$device.FriendlyName
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if (-not $map.ContainsKey($name)) {
+                $map[$name] = ([string]$device.ClassGuid).Trim('{', '}')
+            }
+        }
+    } catch {
+        Write-WallLog -Level WARN ("Geraeteklassen nicht ermittelbar: {0}" -f $_.Exception.Message)
+    }
+    return $map
+}
+
+function Resolve-WallDeviceClass {
+    <#
+        Klassen-GUID eines Geraets, $null wenn unbekannt.
+
+        Kommt ein Geraetename mehrfach vor, haengt powercfg eine laufende
+        Nummer an ("HID-Tastatur (002)"), die es in der Geraeteverwaltung nicht
+        gibt. Fuer die Zuordnung wird sie darum abgeschnitten.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Map
+    )
+
+    if ($Map.ContainsKey($Name)) { return $Map[$Name] }
+
+    $base = $Name -replace '\s+\(\d{1,4}\)$', ''
+    if ($base -ne $Name -and $Map.ContainsKey($base)) { return $Map[$base] }
+
+    return $null
+}
+
+function Disable-WallDeviceWake {
+    <#
+        Nimmt den weckberechtigten Geraeten das Recht, das Panel aus dem
+        Energiesparmodus zu holen.
+
+        Hintergrund: Ein Touchscreen ist in der Regel weckberechtigt. Ohne
+        diesen Schritt holt jede Beruehrung das Panel nachts aus dem Standby.
+        Die Steuerung legt es zwar wieder hin, aber jede Beruehrung kostet
+        einen Aufwach- und Einschlafvorgang und zeigt die Seite dabei ein paar
+        Sekunden lang.
+
+        Netzwerkadapter bleiben ausgenommen, damit Wake-on-LAN weiter
+        moeglich ist. Der Aufwachzeitgeber ist ohnehin nicht betroffen.
+
+        Rueckgabe: Namen der Geraete, denen das Recht genommen wurde - damit
+        die Deinstallation genau diese wieder freigeben kann.
+    #>
+    [CmdletBinding()]
+    param([switch]$IncludeNetwork)
+
+    $map = Get-WallPnpClassMap
+    if ($map.Count -eq 0) {
+        # Ohne Geraeteliste laesst sich ein Netzwerkadapter nicht erkennen.
+        # Das Weckrecht wird trotzdem entzogen - der Zweck der Uebung ist, dass
+        # nur der Zeitgeber weckt - aber es steht im Protokoll, weil damit
+        # Wake-on-LAN entfallen kann.
+        Write-WallLog -Level WARN 'Geraeteklassen nicht verfuegbar: das Weckrecht wird allen Geraeten entzogen, auch Netzwerkadaptern. Wake-on-LAN entfaellt dadurch; einzelne Geraete bei Bedarf mit "powercfg /deviceenablewake" wieder freigeben.'
+    }
+
+    $armed = @(Get-WakeArmedDevices -Map $map)
+    if ($armed.Count -eq 0) {
+        Write-WallLog 'Kein Geraet darf das Panel aufwecken, nichts zu tun.'
+        return @()
+    }
+
+    $disabled = New-Object System.Collections.Generic.List[string]
+
+    foreach ($name in $armed) {
+        $class = Resolve-WallDeviceClass -Name $name -Map $map
+
+        if (-not $IncludeNetwork -and $class -eq $script:ClassGuidNet) {
+            Write-WallLog ("Netzwerkadapter '{0}' bleibt weckberechtigt (Wake-on-LAN)." -f $name)
+            continue
+        }
+
+        $output = & powercfg.exe /devicedisablewake $name
+        if ($LASTEXITCODE -eq 0) {
+            $disabled.Add($name)
+            Write-WallLog ("Geraet '{0}' darf das Panel nicht mehr aufwecken." -f $name)
+        } else {
+            Write-WallLog -Level WARN ("Weckrecht von '{0}' nicht entziehbar (Code {1}): {2}" -f $name, $LASTEXITCODE, ($output -join ' '))
+        }
+    }
+
+    return @($disabled)
+}
+
+function Enable-WallDeviceWake {
+    <#
+        Gibt das Weckrecht zurueck. Gegenstueck zu Disable-WallDeviceWake,
+        gedacht fuer die Deinstallation.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][AllowNull()][string[]]$Names)
+
+    foreach ($name in @($Names)) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+
+        $output = & powercfg.exe /deviceenablewake $name
+        if ($LASTEXITCODE -eq 0) {
+            Write-WallLog ("Geraet '{0}' darf wieder aufwecken." -f $name)
+        } else {
+            Write-WallLog -Level WARN ("Weckrecht von '{0}' nicht wiederherstellbar (Code {1}): {2}" -f $name, $LASTEXITCODE, ($output -join ' '))
+        }
+    }
 }
 
 
@@ -1636,6 +1841,8 @@ Export-ModuleMember -Function @(
     'New-WallSignal', 'Remove-WallSignal', 'Test-WallSignal', 'Wait-WallInterval',
     'Initialize-WallNative', 'Set-DisplayPower', 'Invoke-SystemSuspend',
     'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Get-ConsoleLockSetting', 'Set-WallPowerPolicy',
+    'Get-WallDeviceQuery', 'Get-WakeArmedDevices', 'Get-WallPnpClassMap', 'Resolve-WallDeviceClass',
+    'Disable-WallDeviceWake', 'Enable-WallDeviceWake',
     'Get-WallTaskNames', 'Get-WallTask', 'Stop-WallSleepTask', 'Test-SuspendPrecondition',
     'Test-WakeTaskMatchesSchedule', 'Grant-WallDataAccess', 'Get-SystemLanguageInfo',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',

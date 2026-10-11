@@ -36,6 +36,12 @@
     Laesst den Ruhezustand aktiv. Standard ist, ihn abzuschalten, damit das
     Geraet wirklich in den Standby und nicht in den Ruhezustand geht.
 
+.PARAMETER KeepDeviceWake
+    Laesst allen Geraeten ihr Weckrecht. Standard ist, es ihnen zu nehmen,
+    damit nicht jede Beruehrung des Touchscreens das Panel nachts aus dem
+    Standby holt. Netzwerkadapter sind davon ohnehin ausgenommen, damit
+    Wake-on-LAN weiter funktioniert.
+
 .PARAMETER ServerUrl
     Adresse des Steuerungsservers, z. B. https://panel.example.org. Damit
     holt die Abgleich-Aufgabe zusaetzlich den Zeitplan von dort. Ohne diesen
@@ -69,6 +75,7 @@ param(
     [ValidateSet('Combined', 'DisplayOnly', 'SuspendOnly')][string]$Mode,
     [string]$UserId,
     [switch]$KeepHibernate,
+    [switch]$KeepDeviceWake,
 
     [string]$ServerUrl,
     [string]$PanelId,
@@ -130,6 +137,31 @@ foreach ($day in @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Satu
 # ------------------------------------------------------------ 2. Energieoptionen
 
 Set-WallPowerPolicy -DisableHibernate:(-not $KeepHibernate)
+
+# Weckrecht der Eingabegeraete entziehen. Ohne diesen Schritt holt eine
+# Beruehrung des Touchscreens das Panel nachts aus dem Standby - die Steuerung
+# legt es zwar wieder hin, aber jeder Vorgang kostet Strom und zeigt die Seite
+# kurz an. Netzwerkadapter bleiben weckberechtigt (Wake-on-LAN).
+if ($KeepDeviceWake) {
+    $armed = @(Get-WakeArmedDevices -Map (Get-WallPnpClassMap))
+    Write-Host ('Weckrecht     : unveraendert (-KeepDeviceWake), weckberechtigt: {0}' -f
+        $(if ($armed.Count) { $armed -join ', ' } else { 'keine' })) -ForegroundColor DarkGray
+} else {
+    $disabledWake = @(Disable-WallDeviceWake)
+    if ($disabledWake.Count) {
+        $state = Get-WallState
+        # Zusammenfuehren, damit ein zweiter Lauf frueher entzogene Rechte
+        # nicht aus der Liste verliert - die Deinstallation gibt nur zurueck,
+        # was hier steht.
+        $state.DisabledWakeDevices = @(@($state.DisabledWakeDevices) + $disabledWake |
+            Where-Object { $_ } | Select-Object -Unique)
+        Save-WallState $state
+        Write-Host ('Weckrecht     : {0} Geraet(en) entzogen ({1})' -f $disabledWake.Count,
+            ($disabledWake -join ', ')) -ForegroundColor Green
+    } else {
+        Write-Host 'Weckrecht     : kein Geraet musste geaendert werden' -ForegroundColor DarkGray
+    }
+}
 
 
 # --------------------------------------------------------------- 3. Benutzerkonto

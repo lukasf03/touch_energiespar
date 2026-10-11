@@ -13,8 +13,9 @@
 
 .PARAMETER RestorePowerDefaults
     Setzt Bildschirm- und Standby-Zeitueberschreitung auf uebliche Werte
-    zurueck (Bildschirm 10 Minuten, Standby 30 Minuten) und aktiviert den
-    Ruhezustand wieder.
+    zurueck (Bildschirm 10 Minuten, Standby 30 Minuten), aktiviert den
+    Ruhezustand wieder und gibt den Geraeten das Weckrecht zurueck, das die
+    Einrichtung ihnen genommen hat (Touchscreen, Tastatur, Maus).
 
 .EXAMPLE
     .\Uninstall.ps1
@@ -64,6 +65,10 @@ try {
     Write-Host ('Bildschirm konnte nicht eingeschaltet werden: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
 }
 
+# Vor dem moeglichen Loeschen der Daten lesen: dort steht, welchen Geraeten
+# die Einrichtung das Weckrecht genommen hat.
+$disabledWake = @((Get-WallState).DisabledWakeDevices | Where-Object { $_ })
+
 if ($RestorePowerDefaults) {
     foreach ($argumentList in @(
         @('/change', 'monitor-timeout-ac', '10'),
@@ -73,6 +78,16 @@ if ($RestorePowerDefaults) {
         & powercfg.exe @argumentList | Out-Null
     }
     Write-Host 'Energieoptionen auf uebliche Standardwerte zurueckgesetzt.' -ForegroundColor Green
+
+    if ($disabledWake.Count) {
+        Enable-WallDeviceWake -Names $disabledWake
+        Write-Host ('Weckrecht zurueckgegeben : {0}' -f ($disabledWake -join ', ')) -ForegroundColor Green
+    }
+} elseif ($disabledWake.Count) {
+    Write-Host ''
+    Write-Host ('HINWEIS: Diesen Geraeten fehlt weiterhin das Weckrecht: {0}' -f ($disabledWake -join ', ')) -ForegroundColor Yellow
+    Write-Host '         Das Geraet laesst sich dadurch nicht per Touch, Tastatur oder Maus aus dem' -ForegroundColor Yellow
+    Write-Host '         Energiesparmodus holen. Zurueckgeben mit -RestorePowerDefaults.' -ForegroundColor Yellow
 }
 
 Remove-WallSignal

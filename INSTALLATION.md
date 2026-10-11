@@ -168,6 +168,9 @@ Das Skript macht Folgendes:
   geht und nicht in den Ruhezustand (S4) – das deaktiviert zugleich den
   Schnellstart
 - schaltet die Anmeldung nach dem Aufwachen ab
+- nimmt Touchscreen, Tastatur und Maus das Weckrecht, damit eine Berührung das
+  Panel nachts nicht aus dem Standby holt (Netzwerkadapter behalten es, damit
+  Wake-on-LAN weiter geht; mit `-KeepDeviceWake` abschaltbar)
 - gibt dem Panel-Konto Schreibrecht auf das Datenverzeichnis
 - legt vier geplante Aufgaben unter `\WallDisplayPower\` an
 
@@ -206,6 +209,7 @@ Diese Punkte sollten stimmen:
 | Aufgaben Sleep / WakeTimer / Wake / Sync | alle vier eingerichtet, „weckt auf: ja" bei WakeTimer |
 | Schlafzustände | `S3` (oder `S0` bei Modern Standby) |
 | Aufwachzeitgeber | erlaubt |
+| **Weckberechtigte Geräte** | **keine, oder nur der Netzwerkadapter** – steht dort ein Touchscreen, eine Tastatur oder eine Maus, weckt eine Berührung das Panel nachts auf |
 | **Anmeldung nach Wecken** | **nein** |
 
 Steht bei „Anmeldung nach Wecken" ein **JA**, zeigt das Panel nach dem
@@ -424,6 +428,7 @@ Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 | Morgens Sperrbildschirm statt Strichliste | `-Action Status` → „Anmeldung nach Wecken". Steht dort JA, überschreibt eine Gruppenrichtlinie die Einstellung. |
 | Bild bleibt nach dem Aufwachen schwarz | Meist der Grafiktreiber nach Resume. `"Mode": "DisplayOnly"` ist dann robuster. |
 | Status meldet „Modus (aktiv): DisplayOnly", obwohl `Combined` eingestellt ist | Automatische Rückstufung nach zwei misslungenen Aufwach-Versuchen. Grund steht unter „Hinweis". Nach Behebung: `-Action Reset`. |
+| Panel wacht nachts von selbst auf | `-Action Status` → „Weckberechtigte Geräte". Steht dort ein Eingabegerät, hat es nach einem Treiber- oder Windows-Update sein Weckrecht zurück. `Install.ps1` erneut laufen lassen. |
 | Panel lief eine ganze Nacht durch | Protokoll prüfen. Fehlte der Auslöser (Stromausfall, Zeitumstellung, kein angemeldeter Benutzer), holt die `Sync`-Aufgabe das nach – `-Action Status` muss sie als eingerichtet zeigen. |
 | Anzeige veraltet nach langer Pause | Browser lädt nicht neu, siehe Tipp in 1.4. |
 | Panel erscheint nicht auf dem Server | `-Action Status` → „Fernsteuerung" zeigt den letzten Fehler. Meist Token oder Adresse falsch. |
@@ -435,7 +440,9 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Uninstall.ps1
 ```
 
 Mit `-RemoveData` zusätzlich Konfiguration, Zustand und Protokoll löschen, mit
-`-RestorePowerDefaults` die Energieoptionen auf übliche Werte zurücksetzen.
+`-RestorePowerDefaults` die Energieoptionen auf übliche Werte zurücksetzen –
+dazu gehört das Weckrecht von Touchscreen, Tastatur und Maus. Ohne diesen
+Schalter bleibt es entzogen; die Deinstallation weist dann darauf hin.
 
 ---
 
@@ -455,6 +462,7 @@ Mit `-RemoveData` zusätzlich Konfiguration, Zustand und Protokoll löschen, mit
 - [ ] `Install.ps1` als Administrator gelaufen, drei Auslöser je Aufgabe
 - [ ] **Selbsttest erfolgreich** (oder bewusst auf `DisplayOnly` gestellt)
 - [ ] `-Action Status` geprüft, „Anmeldung nach Wecken" steht auf nein
+- [ ] `-Action Status`: unter „Weckberechtigte Geräte" steht kein Eingabegerät
 - [ ] Ersten echten Fensterwechsel im Protokoll gesehen
 
 **Teil 3 – Steuerungsserver (optional)**

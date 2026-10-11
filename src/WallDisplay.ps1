@@ -632,6 +632,16 @@ function Invoke-StatusAction {
     $lockText = switch ($lock) { $true { 'JA - Panel zeigt dann den Sperrbildschirm' } $false { 'nein' } default { 'nicht ermittelbar' } }
     Write-Host ('  Anmeldung nach Wecken : {0}' -f $lockText) -ForegroundColor $(if ($lock -eq $true) { 'Red' } else { 'Gray' })
 
+    # Nach einem Treiber- oder Windows-Update kann ein Geraet sein Weckrecht
+    # zurueckbekommen. Dann wecken Beruehrungen das Panel nachts wieder, und
+    # hier sieht man es. Abhilfe: Install.ps1 erneut laufen lassen.
+    $armedDevices = @(Get-WakeArmedDevices -Map (Get-WallPnpClassMap))
+    if ($armedDevices.Count) {
+        Write-Host ('  Weckberechtigte Geraete: {0}' -f ($armedDevices -join ', ')) -ForegroundColor Yellow
+    } else {
+        Write-Host '  Weckberechtigte Geraete: keine (nur der Zeitgeber weckt das Panel)'
+    }
+
     $lang = Get-SystemLanguageInfo
     Write-Host ('  Systemsprache         : {0} (ohne Einfluss: Konten ueber SIDs, Energieoptionen ueber GUIDs)' -f $lang.UiCulture) -ForegroundColor DarkGray
 
