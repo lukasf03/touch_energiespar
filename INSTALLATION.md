@@ -143,8 +143,13 @@ Die Standardzeiten stehen in `config.json`. Sie sind so vorbelegt:
 | Samstag | 17:00 | 02:00 (Sonntag) |
 | Sonntag | 16:00 | 23:00 |
 
-Passt das, ändere nichts. Andernfalls jetzt anpassen – nach der Installation
-müsstest du `Install.ps1` erneut laufen lassen.
+Passt das, ändere nichts. Andernfalls jetzt anpassen – vor der Installation ist
+es am einfachsten.
+
+Spätere Änderungen gehören in die Arbeitskopie
+`C:\ProgramData\WallDisplayPower\config.json`, die die Installation anlegt;
+diese Vorlage hier wird danach nicht mehr gelesen. Die Abgleich-Aufgabe zieht
+die Auslösezeiten dann innerhalb von 15 Minuten selbst nach.
 
 ### 2.3 Installation ausführen
 
@@ -207,6 +212,7 @@ Diese Punkte sollten stimmen:
 | Wochenplan | deine Zeiten |
 | Panel soll jetzt | passend zur aktuellen Uhrzeit |
 | Aufgaben Sleep / WakeTimer / Wake / Sync | alle vier eingerichtet, „weckt auf: ja" bei WakeTimer |
+| Auslöser passen zum Wochenplan | ja |
 | Schlafzustände | `S3` (oder `S0` bei Modern Standby) |
 | Aufwachzeitgeber | erlaubt |
 | **Weckberechtigte Geräte** | **keine, oder nur der Netzwerkadapter** – steht dort ein Touchscreen, eine Tastatur oder eine Maus, weckt eine Berührung das Panel nachts auf |
@@ -429,6 +435,8 @@ Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 | Bild bleibt nach dem Aufwachen schwarz | Meist der Grafiktreiber nach Resume. `"Mode": "DisplayOnly"` ist dann robuster. |
 | Status meldet „Modus (aktiv): DisplayOnly", obwohl `Combined` eingestellt ist | Automatische Rückstufung nach zwei misslungenen Aufwach-Versuchen. Grund steht unter „Hinweis". Nach Behebung: `-Action Reset`. |
 | Panel wacht nachts von selbst auf | `-Action Status` → „Weckberechtigte Geräte". Steht dort ein Eingabegerät, hat es nach einem Treiber- oder Windows-Update sein Weckrecht zurück. `Install.ps1` erneut laufen lassen. |
+| Geänderte Zeiten wirken nicht | Zeiten müssen in `C:\ProgramData\WallDisplayPower\config.json` stehen, nicht in der Vorlage im Projektordner. Danach bis zu 15 Minuten warten und `-Action Status` prüfen: „Auslöser passen zum Wochenplan" muss **ja** sein. |
+| Status: „Auslöser passen zum Wochenplan: NEIN" | Der Abgleich zieht das selbst nach. Bleibt es dabei, steht der Grund als `ERROR` im Protokoll – dann `Install.ps1` als Administrator ausführen. |
 | Panel lief eine ganze Nacht durch | Protokoll prüfen. Fehlte der Auslöser (Stromausfall, Zeitumstellung, kein angemeldeter Benutzer), holt die `Sync`-Aufgabe das nach – `-Action Status` muss sie als eingerichtet zeigen. |
 | Anzeige veraltet nach langer Pause | Browser lädt nicht neu, siehe Tipp in 1.4. |
 | Panel erscheint nicht auf dem Server | `-Action Status` → „Fernsteuerung" zeigt den letzten Fehler. Meist Token oder Adresse falsch. |

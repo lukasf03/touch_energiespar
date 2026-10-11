@@ -456,6 +456,12 @@ function Get-WallState {
         # gesetzt wurden. Passt er nicht mehr, wird kein Standby gewagt.
         TaskScheduleFingerprint = $null
 
+        # Wochenplan, fuer den der Abgleich zuletzt versucht hat, die
+        # Ausloeser nachzuziehen, und wie oft. Damit wird ein dauerhaft
+        # misslingender Versuch nicht alle paar Minuten wiederholt.
+        TriggerRepairFingerprint = $null
+        TriggerRepairAttempts    = 0
+
         # Geraete, denen die Einrichtung das Weckrecht genommen hat. Nur die
         # gibt die Deinstallation wieder frei - alles andere waere ein Eingriff
         # in Einstellungen, die die Steuerung nie angefasst hat.

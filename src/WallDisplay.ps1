@@ -302,9 +302,80 @@ function Update-ScheduleFromServer {
     }
 }
 
+function Repair-WallTaskTriggers {
+    <#
+        Zieht die Aufgaben-Ausloeser auf den Wochenplan nach, wenn sie nicht
+        mehr dazu passen.
+
+        Noetig, weil eine von Hand bearbeitete config.json sonst nur halb
+        wirkt: Bildschirm ein und aus richtet sich sofort nach dem neuen Plan,
+        der Standby aber nicht - Test-SuspendPrecondition verweigert ihn,
+        solange der Fingerabdruck nicht zum Plan passt. Das Panel wuerde also
+        nur noch den Bildschirm abschalten, ohne dass es auffaellt.
+
+        Fuer Aenderungen vom Server erledigt das Set-WallScheduleFromRemote.
+        Hier geht es um die oertliche Bearbeitung, die niemand meldet.
+
+        Laeuft in der Abgleich-Aufgabe als SYSTEM, denn das Aendern von
+        Ausloesern braucht Administratorrechte.
+    #>
+    [CmdletBinding()]
+    param([int]$MaxAttempts = 3)
+
+    $config = Get-WallConfig
+    $state = Get-WallState
+    $wanted = Get-ScheduleFingerprint -Config $config
+
+    if ([string]$state.TaskScheduleFingerprint -eq $wanted) { return }
+
+    # Ohne erhoehte Rechte wird nicht gezaehlt: sonst waeren die Versuche
+    # schon verbraucht, bevor die Abgleich-Aufgabe als SYSTEM ueberhaupt dran
+    # war (z. B. nach einem Aufruf von Hand).
+    if (-not (Test-WallAdmin)) {
+        Write-WallLog ('Wochenplan und Aufgaben-Ausloeser passen nicht zusammen. Das Nachziehen braucht Administratorrechte und uebernimmt die Aufgabe "{0}".' -f (Get-WallTaskNames).Sync)
+        return
+    }
+
+    # Der Zaehler gilt je Wochenplan: eine neue Aenderung faengt wieder bei
+    # null an und wird auf jeden Fall versucht.
+    $attempts = if ([string]$state.TriggerRepairFingerprint -eq $wanted) { [int]$state.TriggerRepairAttempts } else { 0 }
+
+    if ($attempts -ge $MaxAttempts) {
+        # Genau einmal deutlich melden, danach schweigen - sonst stuende
+        # dieselbe Zeile alle paar Minuten im Protokoll.
+        if ($attempts -eq $MaxAttempts) {
+            $state.TriggerRepairAttempts = $attempts + 1
+            Save-WallState $state
+            Write-WallLog -Level ERROR ('Die Aufgaben-Ausloeser liessen sich in {0} Versuchen nicht auf den Wochenplan nachziehen. Das Panel schaltet weiter den Bildschirm aus, geht aber nicht in den Standby. Bitte Install.ps1 als Administrator erneut ausfuehren.' -f $attempts)
+        }
+        return
+    }
+
+    $state.TriggerRepairFingerprint = $wanted
+    $state.TriggerRepairAttempts = $attempts + 1
+    Save-WallState $state
+
+    Write-WallLog ('Wochenplan wurde oertlich geaendert ({0}), die Aufgaben-Ausloeser werden nachgezogen.' -f (Format-WallSchedule -Windows $config.Windows))
+    Update-WallTaskTimesFromConfig
+
+    $state = Get-WallState
+    if ([string]$state.TaskScheduleFingerprint -eq $wanted) {
+        $state.TriggerRepairAttempts = 0
+        Save-WallState $state
+        Write-WallLog 'Ausloeser passen wieder zum Wochenplan, der Standby ist damit moeglich.'
+    }
+}
+
 function Invoke-SyncAction {
     $sync = Get-SyncConfig
     Update-ScheduleFromServer -Sync $sync | Out-Null
+
+    # Vor dem Abgleich: Erst muessen die Ausloeser zum Wochenplan passen, sonst
+    # wuerde eine gleich darauf gestartete Nacht-Aufgabe den Standby noch
+    # verweigern und es bliebe bis zum naechsten Durchlauf beim
+    # ausgeschalteten Bildschirm.
+    Repair-WallTaskTriggers
+
     Invoke-Reconcile
 
     if ($sync) {
@@ -617,6 +688,16 @@ function Invoke-StatusAction {
         Write-Host ('  {0,-10} : Status {1}, naechster Start {2}, letzter Start {3}, weckt auf: {4}' -f $name, $task.State, $next, $last, $wake)
     }
 
+    # Die eine Zeile, die darueber entscheidet, ob ueberhaupt ein Standby
+    # stattfindet: passen die Ausloeser nicht zum Plan, bleibt es beim
+    # ausgeschalteten Bildschirm.
+    if ([string]$state.TaskScheduleFingerprint -eq (Get-ScheduleFingerprint -Config $config)) {
+        Write-Host '  Ausloeser passen zum Wochenplan: ja'
+    } else {
+        Write-Host '  Ausloeser passen zum Wochenplan: NEIN - bis dahin nur Bildschirm aus, kein Standby' -ForegroundColor Yellow
+        Write-Host ('                                   Der Abgleich zieht das nach, sonst: Install.ps1 erneut ausfuehren.') -ForegroundColor DarkGray
+    }
+
     Write-Host ''
     Write-Host 'Energieoptionen'
     $states = Get-SleepStateSupport
@@ -795,6 +876,12 @@ function Invoke-ResetAction {
     $state.FallbackReason = $null
     $state.ConsecutiveWakeFailures = 0
     $state.ExpectedWakeUtc = $null
+
+    # Auch das Nachziehen der Ausloeser darf wieder versucht werden - Reset ist
+    # die Stelle, an der man nach einer Behebung von vorne anfaengt.
+    $state.TriggerRepairAttempts = 0
+    $state.TriggerRepairFingerprint = $null
+
     Save-WallState $state
     Write-WallLog ('Rueckstufung aufgehoben, es gilt wieder der konfigurierte Modus "{0}".' -f $config.Mode)
 }

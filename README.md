@@ -44,7 +44,7 @@ Vier geplante Aufgaben greifen ineinander:
 | `\WallDisplayPower\Sleep` | Fensterende | angemeldeter Benutzer | Bildschirm aus, danach Standby |
 | `\WallDisplayPower\WakeTimer` | Fensterbeginn − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
 | `\WallDisplayPower\Wake` | Fensterbeginn | angemeldeter Benutzer | Bildschirm ein, Ruhe-Aufgabe beenden |
-| `\WallDisplayPower\Sync` | alle 5 bzw. 15 Minuten | SYSTEM | Zustand mit dem Wochenplan abgleichen, mit Server zusätzlich den Zeitplan holen |
+| `\WallDisplayPower\Sync` | alle 5 bzw. 15 Minuten | SYSTEM | Auslöser und Zustand mit dem Wochenplan abgleichen, mit Server zusätzlich den Zeitplan holen |
 
 Warum diese Aufteilung:
 
@@ -74,6 +74,11 @@ Ohne dieses Netz würde das Panel in solchen Fällen bis zum nächsten Abend
 durchlaufen, ohne dass es auffällt. Mit Server läuft der Abgleich alle 5
 Minuten, ohne Server alle 15 – dort ist er nur Reserve und muss nicht so oft
 laufen (`-PollMinutes` überschreibt beides).
+
+Dieselbe Aufgabe hält auch die **Auslösezeiten** auf dem Wochenplan: Wurde
+`config.json` von Hand bearbeitet, zieht sie die Aufgaben nach, sodass eine
+Änderung ohne `Install.ps1` vollständig wirkt – siehe
+[Zeiten nachträglich ändern](#zeiten-nachträglich-ändern).
 
 ### Betriebsmodi
 
@@ -359,13 +364,38 @@ Im Wochenplan gilt: Ist `Off` kleiner als `On`, reicht das Fenster über
 Mitternacht in den Folgetag. Sind beide gleich oder steht statt des Eintrags
 `null`, bleibt der Tag ganz aus. Mindestens ein Fenster muss übrig bleiben.
 
-Mit angebundenem Server werden `Schedule`, `Mode` und `Enabled` bei jedem
-Abruf überschrieben – dort ist der Server die Quelle. Von Hand ändern lohnt
-sich dann nur bei den übrigen Werten.
+**Alle Tage aufführen**, die an sein sollen: Der Abschnitt `Schedule` wird als
+Ganzes übernommen, nicht mit dem Standardplan gemischt. Ein fehlender Tag gilt
+damit als aus.
 
-Ohne Server: Nach Änderungen am **Wochenplan** muss `Install.ps1` erneut
-laufen, damit die Auslöser der Aufgaben mitgezogen werden. Änderungen an `Mode`
-und den übrigen Werten greifen ohne Neuinstallation.
+### Zeiten nachträglich ändern
+
+Die maßgebliche Datei ist `C:\ProgramData\WallDisplayPower\config.json` – nicht
+die `config.json` im Projektordner. Die ist nur die Vorlage für die erste
+Einrichtung und bleibt danach wirkungslos.
+
+Nach dem Speichern passiert der Rest von selbst: Die Abgleich-Aufgabe merkt
+beim nächsten Durchlauf, dass die Auslöser der Aufgaben nicht mehr zum Plan
+passen, und zieht sie nach – spätestens nach 15 Minuten, ohne Server, ohne
+`Install.ps1`. Sie läuft als SYSTEM und hat die dafür nötigen Rechte. Im
+Protokoll steht dann:
+
+```
+[INFO] Wochenplan wurde oertlich geaendert (Mo-Do 19:00-22:30, ...), die Aufgaben-Ausloeser werden nachgezogen.
+[INFO] Ausloeser passen wieder zum Wochenplan, der Standby ist damit moeglich.
+```
+
+Ob es geklappt hat, zeigt `-Action Status` in der Zeile
+„Ausloeser passen zum Wochenplan". Steht dort **NEIN**, schaltet das Panel nur
+den Bildschirm aus und geht nicht in den Standby – so ist es gewollt, denn mit
+veralteten Auslösern würde es zur falschen Zeit aufwachen. Gelingt das
+Nachziehen dreimal nicht (etwa weil eine Aufgabe fehlt), steht das als `ERROR`
+im Protokoll und `Install.ps1` muss von Hand laufen.
+
+Mit angebundenem Server werden `Schedule`, `Mode` und `Enabled` bei jedem
+Abruf überschrieben – dort ist der Server die Quelle, und eine örtliche
+Bearbeitung ist nach wenigen Minuten wieder weg. Zeiten also in der
+Weboberfläche ändern.
 
 ---
 
