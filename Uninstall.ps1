@@ -50,13 +50,19 @@ New-WallSignal
 Stop-WallSleepTask
 Start-Sleep -Seconds 3
 
-foreach ($name in @($tasks.Sleep, $tasks.Prewake, $tasks.Wake, $tasks.Sync, 'SelfTestWake')) {
+foreach ($name in @($tasks.Sleep, $tasks.Prewake, $tasks.Wake, $tasks.Sync, $tasks.Kiosk, 'SelfTestWake')) {
     try {
         Unregister-ScheduledTask -TaskPath $tasks.Path -TaskName $name -Confirm:$false -ErrorAction Stop
         Write-Host ('Aufgabe entfernt : {0}{1}' -f $tasks.Path, $name) -ForegroundColor Green
     } catch {
         Write-Host ('Aufgabe fehlte   : {0}{1}' -f $tasks.Path, $name) -ForegroundColor DarkGray
     }
+}
+
+# Ein laufendes Vollbild-Fenster bleibt absichtlich stehen: die Anzeige soll
+# nicht verschwinden, nur weil die Energiesteuerung geht.
+if (@(Get-KioskProcess).Count) {
+    Write-Host 'HINWEIS: Die Strichliste laeuft weiter, kommt nach der naechsten Anmeldung aber nicht mehr von selbst.' -ForegroundColor Yellow
 }
 
 try {

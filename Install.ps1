@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Legt die Konfiguration unter C:\ProgramData\WallDisplayPower ab, setzt die
-    Energieoptionen fuer den Dauerbetrieb und registriert drei geplante Aufgaben:
+    Energieoptionen fuer den Dauerbetrieb und registriert die geplanten Aufgaben:
 
       \WallDisplayPower\Sleep      zur Schlafenszeit, laeuft in der Sitzung des
                                    angemeldeten Benutzers (nur dort kann der
@@ -17,6 +17,10 @@
                                    eingerichtet - den Zeitplan vom Server und
                                    zieht in jedem Fall den tatsaechlichen
                                    Zustand auf den Wochenplan nach
+      \WallDisplayPower\Kiosk      startet die Strichliste im Vollbild, bei
+                                   jeder Anmeldung und danach regelmaessig -
+                                   damit die Anzeige nach einem Neustart oder
+                                   einem Browserabsturz von selbst wiederkommt
 
 .PARAMETER Mode
     Betriebsart ausserhalb der Aktiv-Fenster.
@@ -41,6 +45,19 @@
     damit nicht jede Beruehrung des Touchscreens das Panel nachts aus dem
     Standby holt. Netzwerkadapter sind davon ohnehin ausgenommen, damit
     Wake-on-LAN weiter funktioniert.
+
+.PARAMETER KioskUrl
+    Adresse, die im Vollbild angezeigt wird. Standard ist der Wert aus
+    config.json ("KioskUrl"). Bleibt sie leer, startet die Steuerung keinen
+    Browser.
+
+.PARAMETER BrowserPath
+    Pfad zu chrome.exe. Standard ist, die Datei selbst zu suchen (Registry
+    und die ueblichen Verzeichnisse).
+
+.PARAMETER NoKiosk
+    Richtet keinen Vollbild-Start ein und entfernt eine vorhandene
+    Kiosk-Aufgabe. Fuer Panels, auf denen die Anzeige anders startet.
 
 .PARAMETER ServerUrl
     Adresse des Steuerungsservers, z. B. https://panel.example.org. Damit
@@ -69,6 +86,12 @@
 
 .EXAMPLE
     .\Install.ps1 -ServerUrl https://panel.example.org -PanelId pfarrheim -ApiToken 'geheim'
+
+.EXAMPLE
+    .\Install.ps1 -KioskUrl 'https://strichliste.example.org/#/monitor'
+
+.EXAMPLE
+    .\Install.ps1 -NoKiosk
 #>
 [CmdletBinding()]
 param(
@@ -76,6 +99,10 @@ param(
     [string]$UserId,
     [switch]$KeepHibernate,
     [switch]$KeepDeviceWake,
+
+    [string]$KioskUrl,
+    [string]$BrowserPath,
+    [switch]$NoKiosk,
 
     [string]$ServerUrl,
     [string]$PanelId,
@@ -88,6 +115,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'src\WallDisplay.Core.psm1') -Force -DisableNameChecking
+
+if ($NoKiosk -and $PSBoundParameters.ContainsKey('KioskUrl')) {
+    throw '-NoKiosk und -KioskUrl widersprechen sich: entweder kein Vollbild-Start oder eine Adresse.'
+}
 
 if (-not (Test-WallAdmin)) {
     throw 'Install.ps1 muss in einer PowerShell mit Administratorrechten laufen.'
@@ -110,7 +141,14 @@ Confirm-WallDataRoot | Out-Null
 
 $overrides = @{}
 
-if ($PSBoundParameters.ContainsKey('Mode'))      { $overrides['Mode'] = $Mode }
+if ($PSBoundParameters.ContainsKey('Mode'))        { $overrides['Mode'] = $Mode }
+if ($PSBoundParameters.ContainsKey('KioskUrl'))    { $overrides['KioskUrl'] = $KioskUrl }
+if ($PSBoundParameters.ContainsKey('BrowserPath')) { $overrides['KioskBrowser'] = $BrowserPath }
+
+# -NoKiosk heisst: keine Adresse. Damit entscheidet allein die Konfiguration
+# darueber, ob ein Browser gestartet wird - auch beim Aufwachen, das die
+# Anzeige ebenfalls nachsieht.
+if ($NoKiosk) { $overrides['KioskUrl'] = '' }
 
 $configFile = Save-WallConfig -Values $overrides
 $config = Get-WallConfig
@@ -295,6 +333,14 @@ $syncTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At ([datetime]::Today
     -RepetitionInterval (New-TimeSpan -Minutes $pollMinutes) `
     -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
 
+# Zweiter Ausloeser: einmal beim Hochlaufen. Ohne ihn liefe das Panel nach
+# einem Neustart bis zum naechsten Wiederholungstermin im falschen Zustand
+# weiter, nachts also mit eingeschaltetem Bildschirm. Die Minute Verzoegerung
+# gibt der automatischen Anmeldung Zeit: der Abgleich startet im Zweifel die
+# Nacht- oder die Weck-Aufgabe, und die laufen in der Benutzersitzung.
+$bootTrigger = New-ScheduledTaskTrigger -AtStartup
+$bootTrigger.Delay = 'PT1M'
+
 $syncSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([timespan]::FromMinutes(10)) -MultipleInstances IgnoreNew
@@ -309,9 +355,61 @@ Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Sync -Force `
     -Description $syncDescription `
     -Action (New-ScheduledTaskAction -Execute 'powershell.exe' `
         -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action Sync' -f $paths.ScriptFile)) `
-    -Trigger $syncTrigger -Principal $systemPrincipal -Settings $syncSettings | Out-Null
-Write-Host ('Aufgabe       : {0}{1} alle {2} Minuten{3}' -f $tasks.Path, $tasks.Sync, $pollMinutes,
+    -Trigger @($syncTrigger, $bootTrigger) -Principal $systemPrincipal -Settings $syncSettings | Out-Null
+Write-Host ('Aufgabe       : {0}{1} alle {2} Minuten und beim Systemstart{3}' -f $tasks.Path, $tasks.Sync, $pollMinutes,
     $(if ($syncConfigured) { '' } else { ' (nur Abgleich, kein Server)' })) -ForegroundColor Green
+
+
+# Kiosk-Aufgabe: zeigt die Strichliste im Vollbild. Sie hat zwei Ausloeser,
+# denn beides soll ohne Zutun geschehen:
+#
+#   1. bei jeder Anmeldung - nach einem Neustart ist die Anzeige damit von
+#      selbst wieder da. Die paar Sekunden Verzoegerung geben dem Desktop
+#      Zeit, sonst startet der Browser in ein noch leeres Profil.
+#   2. alle 5 Minuten als Nachkontrolle, falls der Browser abgestuerzt oder
+#      versehentlich geschlossen wurde. Laeuft er, tut die Aufgabe nichts.
+#
+# Bewusst ohne erhoehte Rechte: ein Browser hat als Administrator nichts zu
+# suchen.
+
+if ([string]::IsNullOrWhiteSpace([string]$config.KioskUrl)) {
+    if (Get-WallTask -Name $tasks.Kiosk) {
+        Unregister-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Kiosk -Confirm:$false
+        Write-Host ('Aufgabe       : {0}{1} entfernt (kein Vollbild-Start)' -f $tasks.Path, $tasks.Kiosk) -ForegroundColor Yellow
+    } else {
+        Write-Host 'Anzeige       : kein Vollbild-Start (KioskUrl ist leer)' -ForegroundColor DarkGray
+    }
+} else {
+    $kioskLogon = New-ScheduledTaskTrigger -AtLogOn -User $UserId
+    $kioskLogon.Delay = 'PT15S'
+
+    $kioskWatch = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today)
+    $kioskWatch.StartBoundary = ([datetime]::Today).ToString('yyyy-MM-ddTHH:mm:ss')
+    $kioskWatch.Repetition = (New-ScheduledTaskTrigger -Once -At ([datetime]::Today) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5) `
+        -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
+
+    $kioskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([timespan]::FromMinutes(5)) -MultipleInstances IgnoreNew
+
+    Register-ScheduledTask -TaskPath $tasks.Path -TaskName $tasks.Kiosk -Force `
+        -Description 'Wandpanel: Strichliste im Vollbild anzeigen' `
+        -Action (New-WallInteractiveAction -ActionName 'Kiosk') `
+        -Trigger @($kioskLogon, $kioskWatch) `
+        -Principal (New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Limited) `
+        -Settings $kioskSettings | Out-Null
+
+    Write-Host ('Aufgabe       : {0}{1} (bei Anmeldung und alle 5 Minuten)' -f $tasks.Path, $tasks.Kiosk) -ForegroundColor Green
+    Write-Host ('Anzeige       : {0}' -f $config.KioskUrl) -ForegroundColor Green
+
+    $kioskBrowser = Get-KioskBrowserPath -Preferred ([string]$config.KioskBrowser)
+    if ($kioskBrowser) {
+        Write-Host ('Browser       : {0}' -f $kioskBrowser) -ForegroundColor Green
+    } else {
+        Write-Host 'Browser       : chrome.exe nicht gefunden. Chrome installieren oder -BrowserPath angeben.' -ForegroundColor Red
+    }
+}
 
 Write-WallLog ('Einrichtung abgeschlossen: Modus {0}, Konto {1}.' -f $config.Mode, $UserId)
 

@@ -7,7 +7,7 @@ optional und können auch später nachgezogen werden:
 
 | Teil | Was | Pflicht? | Dauer |
 | --- | --- | --- | --- |
-| 1 | Panel vorbereiten (BIOS, Autologon, Browser) | ja | ca. 45 min |
+| 1 | Panel vorbereiten (BIOS, Autologon, Chrome) | ja | ca. 45 min |
 | 2 | Energiesteuerung installieren | ja | ca. 15 min |
 | 3 | Steuerungsserver (Zeiten von außen ändern) | optional | ca. 30 min |
 | 4 | Fernwartung mit RustDesk | optional | ca. 30 min |
@@ -89,24 +89,24 @@ Sonst zeigt das Panel irgendwann den Sperrbildschirm statt der Strichliste.
 - **Anmeldung nach dem Aufwachen:** erledigt `Install.ps1` in Teil 2 für dich.
   Du kannst es danach in der Statusausgabe nachsehen.
 
-### 1.4 Browser im Vollbild einrichten
+### 1.4 Chrome installieren
 
-Die Strichliste soll dauerhaft im Vollbild laufen und nach einem Neustart von
-selbst wiederkommen.
+Die Strichliste zeigt später **Chrome im Vollbild** an. Den Vollbild-Start
+richtet `Install.ps1` in Teil 2 selbst ein (Aufgabe `Kiosk`: bei jeder
+Anmeldung und danach alle fünf Minuten als Nachkontrolle) – hier muss Chrome
+nur vorhanden sein.
 
-1. Verknüpfung anlegen, z. B. mit Microsoft Edge:
+1. Chrome installieren, am besten **für alle Benutzer**
+   (<https://google.com/chrome>). `Install.ps1` findet die Datei über die
+   Registry und die üblichen Verzeichnisse; liegt sie woanders, hilft
+   `-BrowserPath`.
 
-   ```bash
-   msedge.exe --kiosk "https://strichliste.dpsg-franziskus.de/#/monitor" --edge-kiosk-type=fullscreen --no-first-run
-   ```
+2. Chrome **einmal von Hand starten** und eine eventuelle Ersteinrichtung
+   wegklicken.
 
-   Mit Chrome entsprechend `chrome.exe --kiosk "..." --no-first-run`.
-
-2. Die Verknüpfung in den Autostart legen: `Win`+`R`, dann `shell:startup`
-   eingeben und die Verknüpfung dort hineinziehen. (Der Befehl heißt in jeder
-   Sprache gleich.)
-
-3. Neu starten und prüfen, dass die Strichliste von selbst im Vollbild erscheint.
+Das Browserprofil für die Anzeige legt die Steuerung selbst an, unter
+`%LOCALAPPDATA%\WallDisplayKiosk`. Damit nimmt die Strichliste nichts mit,
+was im Alltagsprofil verstellt wurde.
 
 > **Tipp:** Browser laden die Seite nach langem Standby manchmal nicht neu.
 > Falls die Anzeige veraltet wirkt, hilft eine Kiosk-Erweiterung mit
@@ -119,6 +119,11 @@ Ein Neustart mitten in der Nacht ist unkritisch, einer während der Öffnungszei
 nicht. Stell die **aktiven Stunden** auf die Zeiten, zu denen das Panel an ist:
 *Settings* → *Windows Update* → *Advanced options* → *Active hours*, z. B.
 16:00–02:00. (Einstellungen → Windows Update → Nutzungszeit ändern)
+
+Nach einem Neustart kommt ohnehin alles von selbst zurück: Die geplanten
+Aufgaben überleben ihn, der Abgleich läuft eine Minute nach dem Hochlaufen und
+zieht den Zustand auf den Wochenplan nach, und die Strichliste startet mit der
+automatischen Anmeldung wieder im Vollbild. Von Hand ist nichts zu tun.
 
 ---
 
@@ -177,7 +182,10 @@ Das Skript macht Folgendes:
   Panel nachts nicht aus dem Standby holt (Netzwerkadapter behalten es, damit
   Wake-on-LAN weiter geht; mit `-KeepDeviceWake` abschaltbar)
 - gibt dem Panel-Konto Schreibrecht auf das Datenverzeichnis
-- legt vier geplante Aufgaben unter `\WallDisplayPower\` an
+- richtet den Vollbild-Start der Strichliste ein: Chrome startet bei jeder
+  Anmeldung mit `--kiosk`. Eine andere Adresse mit `-KioskUrl`, gar kein
+  Vollbild-Start mit `-NoKiosk`
+- legt fünf geplante Aufgaben unter `\WallDisplayPower\` an
 
 Am Ende zeigt es den Wochenplan und die Zahl der Auslöser je Aufgabe. Erwartet
 werden beim Standardplan **drei Auslöser pro Aufgabe**.
@@ -211,7 +219,8 @@ Diese Punkte sollten stimmen:
 | --- | --- |
 | Wochenplan | deine Zeiten |
 | Panel soll jetzt | passend zur aktuellen Uhrzeit |
-| Aufgaben Sleep / WakeTimer / Wake / Sync | alle vier eingerichtet, „weckt auf: ja" bei WakeTimer |
+| Aufgaben Sleep / WakeTimer / Wake / Sync / Kiosk | alle fünf eingerichtet, „weckt auf: ja" bei WakeTimer |
+| Anzeige | Adresse der Strichliste, gefundener Browser, „Laeuft gerade: ja" |
 | Auslöser passen zum Wochenplan | ja |
 | Schlafzustände | `S3` (oder `S0` bei Modern Standby) |
 | Aufwachzeitgeber | erlaubt |
@@ -421,6 +430,7 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay
 ```
 
 Weitere Aktionen: `-Action DisplayOn`, `-Action DisplayOff`, `-Action Sync`,
+`-Action Kiosk` (Strichliste starten, falls sie nicht läuft),
 `-Action Reset` (hebt eine automatische Rückstufung auf).
 
 Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
@@ -438,6 +448,8 @@ Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 | Geänderte Zeiten wirken nicht | Zeiten müssen in `C:\ProgramData\WallDisplayPower\config.json` stehen, nicht in der Vorlage im Projektordner. Danach bis zu 15 Minuten warten und `-Action Status` prüfen: „Auslöser passen zum Wochenplan" muss **ja** sein. |
 | Status: „Auslöser passen zum Wochenplan: NEIN" | Der Abgleich zieht das selbst nach. Bleibt es dabei, steht der Grund als `ERROR` im Protokoll – dann `Install.ps1` als Administrator ausführen. |
 | Panel lief eine ganze Nacht durch | Protokoll prüfen. Fehlte der Auslöser (Stromausfall, Zeitumstellung, kein angemeldeter Benutzer), holt die `Sync`-Aufgabe das nach – `-Action Status` muss sie als eingerichtet zeigen. |
+| Strichliste erscheint nicht, nur der Desktop | `-Action Status` → Abschnitt „Anzeige". Fehlt der Browser, Chrome installieren oder `Install.ps1 -BrowserPath` angeben. Sonst `-Action Kiosk` von Hand aufrufen und das Protokoll lesen. |
+| Zwei Vollbild-Fenster übereinander | Ein von Hand gestartetes Chrome-Fenster ohne `--kiosk` erkennt die Aufgabe nicht. Beide schließen, die Aufgabe holt die Anzeige binnen fünf Minuten zurück. |
 | Anzeige veraltet nach langer Pause | Browser lädt nicht neu, siehe Tipp in 1.4. |
 | Panel erscheint nicht auf dem Server | `-Action Status` → „Fernsteuerung" zeigt den letzten Fehler. Meist Token oder Adresse falsch. |
 
@@ -461,7 +473,7 @@ Schalter bleibt es entzogen; die Deinstallation weist dann darauf hin.
 - [ ] BIOS: Wake on RTC aktiviert, ErP/Deep Sleep deaktiviert
 - [ ] Autologon eingerichtet und durch Neustart geprüft
 - [ ] Bildschirmschoner und automatische Sperre aus
-- [ ] Browser startet im Vollbild mit der Strichliste
+- [ ] Chrome installiert und einmal gestartet
 - [ ] Nutzungszeit für Windows Update gesetzt
 
 **Teil 2 – Energiesteuerung**
@@ -471,6 +483,7 @@ Schalter bleibt es entzogen; die Deinstallation weist dann darauf hin.
 - [ ] **Selbsttest erfolgreich** (oder bewusst auf `DisplayOnly` gestellt)
 - [ ] `-Action Status` geprüft, „Anmeldung nach Wecken" steht auf nein
 - [ ] `-Action Status`: unter „Weckberechtigte Geräte" steht kein Eingabegerät
+- [ ] `-Action Status`: im Abschnitt „Anzeige" läuft die Strichliste
 - [ ] Ersten echten Fensterwechsel im Protokoll gesehen
 
 **Teil 3 – Steuerungsserver (optional)**

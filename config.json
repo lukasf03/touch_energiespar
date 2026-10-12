@@ -14,6 +14,11 @@
   "Mode": "Combined",
   "Enabled": true,
 
+  "_hinweis_anzeige": "KioskUrl ist die Seite, die im Vollbild erscheint. Leer heisst: die Steuerung startet keinen Browser. Ist KioskBrowser leer, wird chrome.exe selbst gesucht.",
+
+  "KioskUrl": "https://strichliste.dpsg-franziskus.de/#/monitor",
+  "KioskBrowser": "",
+
   "DisplayOffDelaySeconds": 60,
   "WakePreRollMinutes": 1,
 

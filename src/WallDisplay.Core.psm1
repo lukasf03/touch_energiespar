@@ -11,6 +11,7 @@ $script:TaskSleep    = 'Sleep'
 $script:TaskWake     = 'Wake'
 $script:TaskPrewake  = 'WakeTimer'
 $script:TaskSync     = 'Sync'
+$script:TaskKiosk    = 'Kiosk'
 
 # GUIDs der Energieoptionen (sprachunabhaengig)
 $script:GuidSubSleep    = '238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -23,7 +24,7 @@ $script:GuidConsoleLock = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
 # sprachunabhaengig - der angezeigte Klassenname ist uebersetzt.
 $script:ClassGuidNet    = '4d36e972-e325-11ce-bfc1-08002be10318'
 
-$script:AgentVersion = '1.1.0'
+$script:AgentVersion = '1.2.0'
 
 $script:WeekDays = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
 
@@ -50,6 +51,11 @@ $script:ConfigDefaults = @{
     KeepDisplayOffIntervalSeconds = 20
     StandbyRetryProbeSeconds      = 300
     LogRetentionBytes             = 2097152
+
+    # Vollbild-Anzeige. Leere KioskUrl heisst: die Steuerung startet keinen
+    # Browser. Leerer KioskBrowser heisst: chrome.exe wird selbst gesucht.
+    KioskUrl                      = 'https://strichliste.dpsg-franziskus.de/#/monitor'
+    KioskBrowser                  = ''
 }
 
 
@@ -1175,6 +1181,96 @@ function Enable-WallDeviceWake {
 }
 
 
+# ----------------------------------------------------------- Kiosk-Browser
+
+function Get-KioskBrowserPath {
+    <#
+        Sucht chrome.exe. Ein ausdruecklich angegebener Pfad hat Vortritt,
+        danach die Registry (App Paths, kennt auch eine Installation nur fuer
+        einen Benutzer) und zuletzt die ueblichen Verzeichnisse.
+
+        Rueckgabe $null, wenn nichts gefunden wurde.
+    #>
+    [CmdletBinding()]
+    param([AllowNull()][string]$Preferred)
+
+    if (-not [string]::IsNullOrWhiteSpace($Preferred)) {
+        if (Test-Path -LiteralPath $Preferred) { return $Preferred }
+        Write-WallLog -Level WARN ('Angegebener Browser wurde nicht gefunden: {0}' -f $Preferred)
+    }
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($hive in @('HKLM:', 'HKCU:')) {
+        try {
+            $key = Join-Path $hive 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+            $value = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).'(default)'
+            if ($value) { $candidates.Add(([string]$value).Trim('"')) }
+        } catch { }
+    }
+
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
+        if ($root) { $candidates.Add((Join-Path $root 'Google\Chrome\Application\chrome.exe')) }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+function Get-KioskProcess {
+    <#
+        Laufende Vollbild-Fenster. Erkennungsmerkmal ist '--kiosk' in der
+        Befehlszeile - nur so startet die Steuerung den Browser, ein von Hand
+        geoeffnetes Fenster zaehlt also nicht mit.
+
+        Ohne Administratorrechte sieht Windows nur die Befehlszeilen eigener
+        Prozesse. Die Kiosk-Aufgabe laeuft im selben Konto wie der Browser,
+        dort stimmt das; die Statusanzeige sollte man als Administrator
+        aufrufen.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        return @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine -like '*--kiosk*' })
+    } catch {
+        Write-WallLog -Level WARN ('Laufende Browser-Fenster waren nicht ermittelbar: {0}' -f $_.Exception.Message)
+        return @()
+    }
+}
+
+function Get-KioskArguments {
+    <#
+        Befehlszeile fuer den Vollbildbetrieb.
+
+        Eigenes Browserprofil, damit ein verstelltes oder beschaedigtes
+        Alltagsprofil die Anzeige nicht mitnimmt. Die uebrigen Schalter
+        unterdruecken die Dialoge, die auf einem Wandpanel niemand wegklickt -
+        Ersteinrichtung, Standardbrowser-Frage, "Wiederherstellen?" nach einem
+        Absturz und die Kennwortverwaltung.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Url)
+
+    $profileDir = Join-Path $env:LOCALAPPDATA 'WallDisplayKiosk'
+
+    @(
+        ('--user-data-dir="{0}"' -f $profileDir)
+        '--kiosk'
+        '--no-first-run'
+        '--no-default-browser-check'
+        '--noerrdialogs'
+        '--disable-session-crashed-bubble'
+        '--hide-crash-restore-bubble'
+        '--password-store=basic'
+        ('"{0}"' -f $Url)
+    )
+}
+
+
 # ------------------------------------------------------------ Aufgabenplanung
 
 function Get-WallTaskNames {
@@ -1184,6 +1280,7 @@ function Get-WallTaskNames {
         Wake    = $script:TaskWake
         Prewake = $script:TaskPrewake
         Sync    = $script:TaskSync
+        Kiosk   = $script:TaskKiosk
     }
 }
 
@@ -1850,6 +1947,7 @@ Export-ModuleMember -Function @(
     'Get-SleepStateSupport', 'Get-WakeTimerSetting', 'Get-ConsoleLockSetting', 'Set-WallPowerPolicy',
     'Get-WallDeviceQuery', 'Get-WakeArmedDevices', 'Get-WallPnpClassMap', 'Resolve-WallDeviceClass',
     'Disable-WallDeviceWake', 'Enable-WallDeviceWake',
+    'Get-KioskBrowserPath', 'Get-KioskProcess', 'Get-KioskArguments',
     'Get-WallTaskNames', 'Get-WallTask', 'Stop-WallSleepTask', 'Test-SuspendPrecondition',
     'Test-WakeTaskMatchesSchedule', 'Grant-WallDataAccess', 'Get-SystemLanguageInfo',
     'Get-SyncConfig', 'Save-SyncConfig', 'Protect-WallFile', 'Get-RemoteSchedule', 'Get-RawField',

@@ -11,6 +11,7 @@
       Wake        Tagbetrieb: Bildschirm ein, Nacht-Aufgabe beenden, Protokoll.
       Prewake     Platzhalter-Aufgabe, die den Aufwachzeitgeber ausloest.
       Sync        Zeitplan vom Server holen und den Zustand abgleichen.
+      Kiosk       Strichliste im Vollbild starten, falls sie nicht laeuft.
       Status      Konfiguration, Zustand, Aufgaben und Energieoptionen anzeigen.
       Diagnose    Ausfuehrliche Analyse fuer die Fehlersuche.
       SelfTest    Einmaliger Standby-Test ueber wenige Minuten.
@@ -27,7 +28,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Sleep', 'Wake', 'Prewake', 'Sync', 'Status', 'Diagnose', 'SelfTest', 'Reset', 'DisplayOff', 'DisplayOn')]
+    [ValidateSet('Sleep', 'Wake', 'Prewake', 'Sync', 'Kiosk', 'Status', 'Diagnose', 'SelfTest', 'Reset', 'DisplayOff', 'DisplayOn')]
     [string]$Action,
 
     [ValidateRange(2, 60)]
@@ -312,6 +313,12 @@ function Invoke-WakeAction {
     # Nachtbetrieb entfernt. Wuerde sie hier geloescht, koennte eine noch
     # laufende Nachkontrolle das Signal verpassen und den Bildschirm wieder
     # ausschalten.
+
+    # Nach dem Aufwachen gleich nachsehen, ob die Anzeige laeuft. Ohne das
+    # bliebe der Bildschirm nach einem Neustart oder einem Absturz des
+    # Browsers leer, bis die Kiosk-Aufgabe das naechste Mal nachsieht.
+    if (-not [string]::IsNullOrWhiteSpace([string]$config.KioskUrl)) { Invoke-KioskAction }
+
     Write-WallLog 'Tagbetrieb aktiv.'
 }
 
@@ -320,6 +327,51 @@ function Invoke-PrewakeAction {
     $state.LastPrewakeUtc = (Get-Date).ToUniversalTime().ToString('o')
     Save-WallState $state
     Write-WallLog 'Aufwachzeitgeber hat ausgeloest, das Geraet ist wach.'
+}
+
+
+# ------------------------------------------------------------------- Anzeige
+
+function Invoke-KioskAction {
+    <#
+        Startet die Strichliste im Vollbild, wenn sie nicht schon laeuft.
+
+        Die Kiosk-Aufgabe ruft das bei jeder Anmeldung auf und danach
+        regelmaessig. Damit kommt die Anzeige nach einem Neustart von selbst
+        wieder, und ebenso, wenn der Browser abgestuerzt oder versehentlich
+        geschlossen wurde. Laeuft bereits ein Vollbild-Fenster, tut die
+        Aktion nichts - sonst stapelten sich die Fenster.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $config = Get-WallConfig
+    $url = [string]$config.KioskUrl
+
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        Write-WallLog -Level WARN 'Anzeige nicht gestartet: in der Konfiguration steht keine KioskUrl.'
+        return
+    }
+
+    if (@(Get-KioskProcess).Count) { return }
+
+    $browser = Get-KioskBrowserPath -Preferred ([string]$config.KioskBrowser)
+    if (-not $browser) {
+        Write-WallLog -Level ERROR 'Anzeige nicht gestartet: chrome.exe wurde nicht gefunden. Chrome installieren oder "KioskBrowser" in der Konfiguration auf die Datei zeigen lassen.'
+        return
+    }
+
+    # Eine Zeichenkette statt einer Liste: Start-Process setzt um die
+    # einzelnen Elemente keine Anfuehrungszeichen, das uebernimmt
+    # Get-KioskArguments selbst.
+    $arguments = (Get-KioskArguments -Url $url) -join ' '
+
+    try {
+        Start-Process -FilePath $browser -ArgumentList $arguments -ErrorAction Stop | Out-Null
+        Write-WallLog ('Anzeige im Vollbild gestartet: {0}' -f $url)
+    } catch {
+        Write-WallLog -Level ERROR ('Browser "{0}" liess sich nicht starten: {1}' -f $browser, $_.Exception.Message)
+    }
 }
 
 
@@ -736,10 +788,16 @@ function Invoke-StatusAction {
 
     Write-Host ''
     Write-Host 'Aufgaben'
-    foreach ($name in @($tasks.Sleep, $tasks.Prewake, $tasks.Wake, $tasks.Sync)) {
+    foreach ($name in @($tasks.Sleep, $tasks.Prewake, $tasks.Wake, $tasks.Sync, $tasks.Kiosk)) {
         $task = Get-WallTask -Name $name
         if (-not $task) {
-            Write-Host ('  {0,-10} : nicht eingerichtet' -f $name) -ForegroundColor Yellow
+            # Eine fehlende Kiosk-Aufgabe ist kein Mangel, solange gar kein
+            # Vollbild-Start gewuenscht ist (Install.ps1 -NoKiosk).
+            if ($name -eq $tasks.Kiosk -and [string]::IsNullOrWhiteSpace([string]$config.KioskUrl)) {
+                Write-Host ('  {0,-10} : nicht eingerichtet (kein Vollbild-Start)' -f $name) -ForegroundColor DarkGray
+            } else {
+                Write-Host ('  {0,-10} : nicht eingerichtet' -f $name) -ForegroundColor Yellow
+            }
             continue
         }
         $info = $null
@@ -758,6 +816,18 @@ function Invoke-StatusAction {
     } else {
         Write-Host '  Ausloeser passen zum Wochenplan: NEIN - bis dahin nur Bildschirm aus, kein Standby' -ForegroundColor Yellow
         Write-Host ('                                   Der Abgleich zieht das nach, sonst: Install.ps1 erneut ausfuehren.') -ForegroundColor DarkGray
+    }
+
+    Write-Host ''
+    Write-Host 'Anzeige'
+    if ([string]::IsNullOrWhiteSpace([string]$config.KioskUrl)) {
+        Write-Host '  Vollbild-Start        : nicht eingerichtet (KioskUrl ist leer)' -ForegroundColor DarkGray
+    } else {
+        Write-Host ('  Adresse               : {0}' -f $config.KioskUrl)
+        $browser = Get-KioskBrowserPath -Preferred ([string]$config.KioskBrowser)
+        Write-Host ('  Browser               : {0}' -f $(if ($browser) { $browser } else { 'chrome.exe NICHT GEFUNDEN' })) -ForegroundColor $(if ($browser) { 'Gray' } else { 'Red' })
+        $kiosk = @(Get-KioskProcess).Count
+        Write-Host ('  Laeuft gerade         : {0}' -f $(if ($kiosk) { 'ja' } else { 'nein' })) -ForegroundColor $(if ($kiosk) { 'Gray' } else { 'Yellow' })
     }
 
     Write-Host ''
@@ -957,6 +1027,7 @@ try {
         'Wake'       { Invoke-WakeAction }
         'Prewake'    { Invoke-PrewakeAction }
         'Sync'       { Invoke-SyncAction }
+        'Kiosk'      { Invoke-KioskAction }
         'Status'     { Invoke-StatusAction }
         'Diagnose'   { Invoke-DiagnoseAction }
         'SelfTest'   { Invoke-SelfTestAction }

@@ -37,14 +37,15 @@ Status` zeigt die erkannte Sprache rein zur Information an.
 
 ## Wie es funktioniert
 
-Vier geplante Aufgaben greifen ineinander:
+Fünf geplante Aufgaben greifen ineinander:
 
 | Aufgabe | Zeitpunkt | Konto | Zweck |
 | --- | --- | --- | --- |
 | `\WallDisplayPower\Sleep` | Fensterende | angemeldeter Benutzer | Bildschirm aus, danach Standby |
 | `\WallDisplayPower\WakeTimer` | Fensterbeginn − 1 min | SYSTEM | holt das Gerät per Aufwachzeitgeber aus dem Standby |
 | `\WallDisplayPower\Wake` | Fensterbeginn | angemeldeter Benutzer | Bildschirm ein, Ruhe-Aufgabe beenden |
-| `\WallDisplayPower\Sync` | alle 5 bzw. 15 Minuten | SYSTEM | Auslöser und Zustand mit dem Wochenplan abgleichen, mit Server zusätzlich den Zeitplan holen |
+| `\WallDisplayPower\Sync` | alle 5 bzw. 15 Minuten, dazu Systemstart | SYSTEM | Auslöser und Zustand mit dem Wochenplan abgleichen, mit Server zusätzlich den Zeitplan holen |
+| `\WallDisplayPower\Kiosk` | Anmeldung, dann alle 5 Minuten | angemeldeter Benutzer | Strichliste im Vollbild starten, falls sie nicht läuft |
 
 Warum diese Aufteilung:
 
@@ -56,6 +57,10 @@ Warum diese Aufteilung:
   wird. `Wake` hat denselben Zeitgeber zusätzlich als zweite Absicherung.
 - Die Auslösezeiten sind als **Ortszeit** eingetragen, nicht als UTC. Damit
   bleiben 22:00 und 06:00 auch nach der Zeitumstellung 22:00 und 06:00.
+- **Die Anzeige selbst** startet die Aufgabe `Kiosk`: bei jeder Anmeldung und
+  danach alle fünf Minuten als Nachkontrolle. Damit kommt die Strichliste nach
+  einem Neustart von selbst zurück, auch wenn der Browser abgestürzt oder
+  versehentlich geschlossen wurde. Läuft sie schon, tut die Aufgabe nichts.
 
 ### Das Sicherheitsnetz
 
@@ -69,6 +74,12 @@ nach. Das fängt jeden verpassten Auslöser auf:
   also nicht starten
 - die Nacht der Zeitumstellung im März: die Ortszeit 02:00 gibt es nicht, der
   Auslöser für Freitag- und Samstagnacht zündet daher nicht
+
+Dazu läuft der Abgleich **einmal beim Hochlaufen**, eine Minute nach dem Start,
+damit die automatische Anmeldung durch ist. Ohne diesen Auslöser liefe das
+Panel nach einem Neustart bis zum nächsten Wiederholungstermin im falschen
+Zustand weiter – nach einem nächtlichen Update-Neustart also mit
+eingeschaltetem Bildschirm.
 
 Ohne dieses Netz würde das Panel in solchen Fällen bis zum nächsten Abend
 durchlaufen, ohne dass es auffällt. Mit Server läuft der Abgleich alle 5
@@ -331,7 +342,10 @@ powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\Install.ps1 -Us
 - Touchscreen, Tastatur und Maus das Weckrecht nehmen, damit eine Berührung das
   Panel nachts nicht aus dem Standby holt; Netzwerkadapter behalten es (mit
   `-KeepDeviceWake` unterdrückbar)
-- die vier Aufgaben registrieren
+- die Strichliste im Vollbild einrichten: Chrome startet bei jeder Anmeldung
+  mit `--kiosk` (Adresse aus `KioskUrl`, mit `-KioskUrl` überschreibbar, mit
+  `-NoKiosk` abschaltbar)
+- die fünf Aufgaben registrieren
 
 3. **Selbsttest ausführen** – das ist der entscheidende Schritt:
 
@@ -362,6 +376,8 @@ Während des Tests nichts berühren. Danach steht im Klartext, ob der Modus
 | `KeepDisplayOffIntervalSeconds` | `20` | Takt des Bildschirm-Wächters |
 | `StandbyRetryProbeSeconds` | `300` | Takt, in dem der Wächter prüft, ob ein übersprungener Standby wieder möglich ist |
 | `Enabled` | `true` | Zeitplan aktiv; `false` lässt das Panel durchlaufen |
+| `KioskUrl` | Strichliste | Seite, die im Vollbild erscheint; leer = die Steuerung startet keinen Browser |
+| `KioskBrowser` | leer | Pfad zu `chrome.exe`; leer = selbst suchen (Registry und übliche Verzeichnisse) |
 
 Im Wochenplan gilt: Ist `Off` kleiner als `On`, reicht das Fenster über
 Mitternacht in den Folgetag. Sind beide gleich oder steht statt des Eintrags
@@ -423,7 +439,8 @@ armierte Geräte, Ereignisprotokoll):
 powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay.ps1 -Action Diagnose
 ```
 
-Weitere Aktionen: `-Action DisplayOff`, `-Action DisplayOn`, `-Action Reset`.
+Weitere Aktionen: `-Action DisplayOff`, `-Action DisplayOn`, `-Action Kiosk`,
+`-Action Reset`.
 
 Protokoll: `C:\ProgramData\WallDisplayPower\walldisplay.log`
 
@@ -461,8 +478,21 @@ robustere Wahl, weil das Gerät durchläuft.
 
 ### Anzeige der Strichliste
 
-Die Steuerung lädt die Seite nicht neu. Wenn der Kiosk-Browser nach einer Nacht
-im Standby eine veraltete Ansicht zeigt, empfiehlt sich im Browser selbst ein
+Die Aufgabe `Kiosk` startet Chrome im Vollbild: bei jeder Anmeldung und danach
+alle fünf Minuten als Nachkontrolle. Ein laufendes Fenster erkennt sie an
+`--kiosk` in der Befehlszeile – läuft eines, tut sie nichts. Chrome bekommt ein
+eigenes Profil unter `%LOCALAPPDATA%\WallDisplayKiosk`, damit ein verstelltes
+Alltagsprofil die Anzeige nicht mitnimmt.
+
+`-Action Status` zeigt unter „Anzeige", welche Adresse gilt, welcher Browser
+gefunden wurde und ob er gerade läuft. Von Hand starten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\WindowsEnergie\src\WallDisplay.ps1 -Action Kiosk
+```
+
+Die Steuerung lädt die Seite nicht neu. Wenn der Browser nach einer Nacht im
+Standby eine veraltete Ansicht zeigt, empfiehlt sich im Browser selbst ein
 periodischer Reload (z. B. Kiosk-Erweiterung oder eine Meta-Refresh-Hülle).
 Unter `DisplayOnly` tritt das Problem praktisch nicht auf.
 
